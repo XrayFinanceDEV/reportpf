@@ -28,7 +28,7 @@ import httpx
 # Import del nostro extractor (V3 Optimized - Only analyzes relevant pages)
 from extdichiarazione_v3_optimized import DichiarazioneExtractorV3Optimized as DichiarazioneExtractorMinimal
 # Import del calculator per le formule
-from formule_report_pf import ReportPFCalculator
+from formule_report_pf import ReportPFCalculator, ReportPFCalculatorSemplificato
 # Import del validation module
 from validation import validate_and_enrich
 # Import anbil data extractor
@@ -436,12 +436,26 @@ async def upload_process_biennio(
             }
         }
 
-        # Calcola tutti gli indicatori usando ReportPFCalculator
+        # Detect accounting type (semplificata vs ordinaria)
+        accounting_type_corrente = DichiarazioneExtractorMinimal.detect_accounting_type(dati_corrente)
+        accounting_type_precedente = DichiarazioneExtractorMinimal.detect_accounting_type(dati_precedente)
+        # If either year is semplificata, treat the whole report as semplificata
+        is_semplificata = accounting_type_corrente == "semplificata" or accounting_type_precedente == "semplificata"
+        accounting_type = "semplificata" if is_semplificata else "ordinaria"
+        print(f"📋 Accounting type: {accounting_type} (corrente={accounting_type_corrente}, precedente={accounting_type_precedente})")
+
+        # Calcola indicatori usando il calculator appropriato
         try:
-            calculator = ReportPFCalculator(
-                data_2023=dati_corrente,
-                data_2022=dati_precedente
-            )
+            if is_semplificata:
+                calculator = ReportPFCalculatorSemplificato(
+                    data_current=dati_corrente,
+                    data_previous=dati_precedente
+                )
+            else:
+                calculator = ReportPFCalculator(
+                    data_2023=dati_corrente,
+                    data_2022=dati_precedente
+                )
             complete_report = calculator.generate_complete_report()
         except Exception as calc_error:
             print(f"Warning: Error calculating formulas: {calc_error}")
@@ -451,10 +465,19 @@ async def upload_process_biennio(
         os.unlink(temp_corrente)
         os.unlink(temp_precedente)
 
-        # Check if either PDF is a Persona Fisica declaration
-        is_pf_corrente = dati_corrente.get('_entity_type') == 'PF'
-        is_pf_precedente = dati_precedente.get('_entity_type') == 'PF'
-        is_persona_fisica = is_pf_corrente or is_pf_precedente
+        # Check entity types
+        entity_corrente = dati_corrente.get('_entity_type', 'SP')
+        entity_precedente = dati_precedente.get('_entity_type', 'SP')
+        # PF (without business income) is unsupported; PF_RE and PF_RG are supported
+        is_pf_no_business = entity_corrente == 'PF' or entity_precedente == 'PF'
+        # Determine display entity type
+        if is_pf_no_business:
+            display_entity_type = "PF"
+        elif entity_corrente in ('PF_RE', 'PF_RG') or entity_precedente in ('PF_RE', 'PF_RG'):
+            display_entity_type = entity_corrente if entity_corrente != 'SP' else entity_precedente
+        else:
+            display_entity_type = "SP"
+        is_persona_fisica = is_pf_no_business
 
         # Extract validation results
         validation_corrente = dati_corrente.get('extraction_metadata', {}).get('validation', {})
@@ -468,7 +491,8 @@ async def upload_process_biennio(
         # Build response with validation info
         response_data = {
             "success": True,
-            "entity_type": "PF" if is_persona_fisica else "SP",
+            "entity_type": display_entity_type,
+            "accounting_type": accounting_type,
             "data": dati_json,
             "sommario": sommario,
             "validation": {

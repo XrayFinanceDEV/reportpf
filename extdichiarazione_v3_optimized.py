@@ -32,29 +32,45 @@ class DichiarazioneExtractorV3Optimized:
     MAX_TOKENS = 8192
 
     # Year-specific code mappings
-    # 2024 format uses 3-digit ICI codes: ICI011, ICI014, etc.
-    # 2023 format uses 5-digit ICI codes: ICI01101, ICI01401, etc.
+    # 2024 format uses 3-digit codes: ICI011, ICA013, etc.
+    # 2023 format uses 5-digit codes: ICI01101, ICA01301, etc.
     CODES_2024 = {
+        # ICI - Imprese (SP, Ditta Individuale)
         'ICI001', 'ICI004', 'ICI005', 'ICI006', 'ICI008', 'ICI009',
         'ICI010', 'ICI011', 'ICI012', 'ICI013', 'ICI014', 'ICI015',
         'ICI016', 'ICI017', 'ICI019', 'ICI024', 'ICI027', 'ICI029',
+        # ICA - Liberi Professionisti (Quadro RE)
+        'ICA001', 'ICA003', 'ICA004', 'ICA005', 'ICA006', 'ICA007',
+        'ICA008', 'ICA012', 'ICA013', 'ICA014', 'ICA015', 'ICA016',
+        'ICA017', 'ICA018', 'ICA020', 'ICA024', 'ICA027', 'ICA028',
+        # ISA indicators
         'ISAAFF', 'IIE001', 'IIE002', 'IIE003'
     }
 
     CODES_2023 = {
+        # ICI - Imprese (5-digit format)
         'ICI00101', 'ICI00401', 'ICI00501', 'ICI00601', 'ICI00801', 'ICI00901',
         'ICI01001', 'ICI01101', 'ICI01201', 'ICI01301', 'ICI01401', 'ICI01501',
         'ICI01601', 'ICI01701', 'ICI01901', 'ICI02401', 'ICI02701', 'ICI02801',
         'ICI02901',  # Alternative for beni strumentali
+        # ICA - Liberi Professionisti (5-digit format)
+        'ICA00101', 'ICA00301', 'ICA00401', 'ICA00501', 'ICA00601', 'ICA00701',
+        'ICA00801', 'ICA01201', 'ICA01301', 'ICA01401', 'ICA01501', 'ICA01601',
+        'ICA01701', 'ICA01801', 'ICA02001', 'ICA02401', 'ICA02701', 'ICA02801',
+        # ISA indicators (2023 format)
         'IIISAAFF',  # 2023 format with triple I
         'IIE00101', 'IIE00201', 'IIE00301'  # ISA indicators with 5 digits
     }
 
     # Common codes that work across all years
     CODES_COMMON = {
-        # Quadro F - Revenue and costs
+        # Quadro F - Revenue and costs (SP, Ditta Individuale)
         'F01', 'F02', 'F03', 'F05', 'F08', 'F09', 'F10',
         'F12', 'F14', 'F15', 'F17', 'F19', 'F20', 'F21',
+
+        # Quadro RE - Professional Income (Liberi Professionisti)
+        'RE1', 'RE2', 'RE3', 'RE6', 'RE7', 'RE8', 'RE9',
+        'RE11', 'RE12', 'RE13', 'RE14', 'RE19', 'RE20', 'RE23',
 
         # Quadro RS - Balance sheet (actual codes, not RS100-RS114)
         'RS1', 'RS11', 'RS12', 'RS13', 'RS14', 'RS15',
@@ -155,23 +171,48 @@ class DichiarazioneExtractorV3Optimized:
 
     def detect_entity_type(self, pdf_path: str) -> str:
         """
-        Detect whether the PDF is a persona fisica (PF) or società di persone (SP) declaration.
-        Scans the first few pages for entity type markers.
-
-        Strategy: Look for 'RPF' as a standalone word on early pages.
-        If found, it's a PF declaration. Otherwise assume SP (the expected/supported type).
+        Detect the entity type from the PDF declaration.
 
         Returns:
-            'PF' for persone fisiche, 'SP' for società di persone
+            'SP'    - Società di Persone (standard extraction)
+            'PF_RE' - Persona Fisica with Quadro RE (Libero Professionista)
+            'PF_RG' - Persona Fisica with Quadro RG (Ditta Individuale semplificata)
+            'PF'    - Persona Fisica without business income (not supported)
         """
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                # Check first 3 pages (page 1 text may be reversed in some PDF generators)
-                for page_idx in range(min(3, len(pdf.pages))):
+                is_pf = False
+                has_re = False
+                has_rg = False
+
+                for page_idx in range(min(len(pdf.pages), 25)):
                     text = (pdf.pages[page_idx].extract_text() or '').upper()
-                    # Look for RPF as standalone token (not part of another word)
-                    if re.search(r'\bRPF\b', text):
-                        logger.info(f"Detected entity type: PERSONA FISICA (found 'RPF' on page {page_idx + 1})")
+
+                    # Check first 3 pages for PF marker
+                    if page_idx < 3 and re.search(r'\bRPF\b', text):
+                        is_pf = True
+
+                    # Check for Quadro RE (lavoro autonomo / professionista)
+                    if 'QUADRO RE' in text and 'LAVORO AUTONOMO' in text:
+                        has_re = True
+
+                    # Check for Quadro RG (reddito d'impresa semplificata)
+                    if 'QUADRO RG' in text and ('REDDITO' in text):
+                        has_rg = True
+
+                    # Check for ICA codes (confirms professionista ISA)
+                    if re.search(r'\bICA\d{3}\b', text) or re.search(r'\bICA\d{5}\b', text):
+                        has_re = True
+
+                if is_pf:
+                    if has_re:
+                        logger.info("Detected entity type: PF_RE (Persona Fisica - Libero Professionista)")
+                        return 'PF_RE'
+                    elif has_rg:
+                        logger.info("Detected entity type: PF_RG (Persona Fisica - Ditta Individuale)")
+                        return 'PF_RG'
+                    else:
+                        logger.info("Detected entity type: PF (Persona Fisica - no business income)")
                         return 'PF'
 
         except Exception as e:
@@ -179,6 +220,51 @@ class DichiarazioneExtractorV3Optimized:
 
         logger.info("Detected entity type: SOCIETÀ DI PERSONE (no PF markers found)")
         return 'SP'
+
+    @staticmethod
+    def detect_accounting_type(extracted_data: Dict[str, Any]) -> str:
+        """
+        Detect whether this entity uses contabilità semplificata or ordinaria.
+
+        Semplificata entities (Quadro RG) have NO balance sheet (stato patrimoniale):
+        all quadro_rs fields are zero. Only ISA Prospetto Economico data is available.
+
+        Returns:
+            'semplificata' or 'ordinaria'
+        """
+        rs = extracted_data.get("quadro_rs", {})
+        if not rs:
+            return "semplificata"
+
+        # Check if ALL balance sheet values are zero
+        rs_values = [
+            rs.get("immobilizzazioni_immateriali", 0),
+            rs.get("immobilizzazioni_materiali", 0),
+            rs.get("immobilizzazioni_finanziarie", 0),
+            rs.get("rimanenze", 0),
+            rs.get("crediti_clienti", 0),
+            rs.get("altri_crediti", 0),
+            rs.get("attivita_finanziarie", 0),
+            rs.get("disponibilita_liquide", 0),
+            rs.get("ratei_risconti_attivi", 0),
+            rs.get("totale_attivo", 0),
+            rs.get("patrimonio_netto", 0),
+            rs.get("fondi_rischi_oneri", 0),
+            rs.get("tfr", 0),
+            rs.get("debiti_banche_breve", 0),
+            rs.get("debiti_banche_lungo", 0),
+            rs.get("debiti_fornitori", 0),
+            rs.get("altri_debiti", 0),
+            rs.get("ratei_risconti_passivi", 0),
+        ]
+
+        all_zero = all(float(v or 0) == 0 for v in rs_values)
+        if all_zero:
+            logger.info("Detected accounting type: SEMPLIFICATA (all quadro_rs fields are zero)")
+            return "semplificata"
+
+        logger.info("Detected accounting type: ORDINARIA (quadro_rs has non-zero values)")
+        return "ordinaria"
 
     def _build_empty_result(self, pdf_path: str, anno: int, entity_type: str) -> Dict[str, Any]:
         """
@@ -415,6 +501,145 @@ IMPORTANT:
 - If a field is not found, use 0 for numbers or "" for strings
 - Return ONLY valid JSON, no markdown formatting or explanations"""
 
+    def _build_extraction_prompt_re(self, anno: int) -> str:
+        """Build extraction prompt for PF with Quadro RE (Libero Professionista)"""
+
+        # ICA code format depends on year
+        if anno == 2024:
+            ica_compensi = "ICA001"
+            ica_totale_compensi = "ICA003"
+            ica_canoni_leasing = "ICA004"
+            ica_canoni_noleggio = "ICA005"
+            ica_compensi_terzi = "ICA007"
+            ica_consumi = "ICA008"
+            ica_altre_spese = "ICA012"
+            ica_valore_aggiunto = "ICA013"
+            ica_lavoro_dipendente = "ICA014"
+            ica_collaboratori = "ICA015"
+            ica_mol = "ICA016"
+            ica_ammortamenti = "ICA017"
+            ica_reddito_operativo = "ICA018"
+            ica_interessi = "ICA020"
+            ica_reddito = "ICA024"
+            ica_addetti = "ICA027"
+            ica_beni_strumentali = "ICA028"
+            isa_punteggio = "ISAAFF"
+            iie_ricavi = "IIE001"
+            iie_va = "IIE002"
+            iie_reddito = "IIE003"
+        else:  # 2023 and earlier (5-digit format)
+            ica_compensi = "ICA00101"
+            ica_totale_compensi = "ICA00301"
+            ica_canoni_leasing = "ICA00401"
+            ica_canoni_noleggio = "ICA00501"
+            ica_compensi_terzi = "ICA00701"
+            ica_consumi = "ICA00801"
+            ica_altre_spese = "ICA01201"
+            ica_valore_aggiunto = "ICA01301"
+            ica_lavoro_dipendente = "ICA01401"
+            ica_collaboratori = "ICA01501"
+            ica_mol = "ICA01601"
+            ica_ammortamenti = "ICA01701"
+            ica_reddito_operativo = "ICA01801"
+            ica_interessi = "ICA02001"
+            ica_reddito = "ICA02401"
+            ica_addetti = "ICA02701"
+            ica_beni_strumentali = "ICA02801"
+            isa_punteggio = "IIISAAFF"
+            iie_ricavi = "IIE00101"
+            iie_va = "IIE00201"
+            iie_reddito = "IIE00301"
+
+        return f"""You are a tax document data extraction specialist. You will receive selected pages from an Italian PF tax declaration (Redditi Persone Fisiche) for a LIBERO PROFESSIONISTA (Quadro RE) for year {anno}.
+
+Your task is to extract ALL the following fields and return them as a JSON object. Be extremely precise with numbers.
+
+CRITICAL INSTRUCTIONS:
+1. Extract numbers EXACTLY as they appear in the PDF
+2. For Italian number format (e.g., "123.456,78"), convert to: 123456.78
+3. If a field is missing or unclear, use 0 for numbers and "" for strings
+4. The "anno" field MUST be extracted from "Periodo d'imposta YYYY" text. Expected: {anno}
+5. Return ONLY the JSON object, no additional text or explanation
+6. This is a PROFESSIONISTA declaration - income is in Quadro RE (not Quadro F)
+7. ISA data uses ICA codes (not ICI codes)
+
+FIELD MAPPING for Libero Professionista (year {anno}):
+
+**identificativi:**
+- codice_fiscale: 16-char personal tax code (e.g., RDCMRG51M19C933Z)
+- partita_iva: VAT number (11 digits, from page 2)
+- ragione_sociale: Full name (COGNOME NOME from page 1)
+- anno: Extract from "Periodo d'imposta YYYY". Expected: {anno}
+
+**ricavi (from Quadro RE):**
+- ricavi_dichiarati: RE2 / {ica_compensi} - Compensi dall'attività professionale
+- altri_componenti_positivi: RE3 + RE4 + RE5 (Altre somme + Plusvalenze + Compensi non annotati)
+
+**costi (from Quadro RE + ISA Prospetto Economico ICA):**
+- esistenze_iniziali: 0 (professionals don't have inventory)
+- rimanenze_finali: 0 (professionals don't have inventory)
+- costo_materie_prime: {ica_consumi} / RE14 - Consumi
+- costo_servizi: {ica_compensi_terzi} / RE12 - Compensi corrisposti a terzi
+- godimento_beni_terzi: {ica_canoni_leasing} + {ica_canoni_noleggio} / RE8 + RE9 - Canoni di locazione
+- costo_personale: {ica_lavoro_dipendente} / RE11 - Spese lavoro dipendente
+- spese_collaboratori: {ica_collaboratori} - Spese collaboratori coordinati e continuativi
+- ammortamenti: {ica_ammortamenti} / RE7 - Ammortamenti
+- accantonamenti: 0 (not in RE)
+- altri_costi: {ica_altre_spese} / RE19 - Altre spese documentate (include RE10, RE15, RE16, RE17)
+- oneri_finanziari: {ica_interessi} / RE13 - Interessi passivi
+
+**risultati (from ISA Prospetto Economico ICA):**
+- valore_aggiunto: {ica_valore_aggiunto} - Valore aggiunto
+- mol: {ica_mol} - Margine Operativo Lordo
+- reddito_operativo: {ica_reddito_operativo} - Reddito operativo
+- reddito_impresa: {ica_reddito} / RE23 - Reddito delle attività professionali
+
+**personale:**
+- giornate_dipendenti: A01 - Giornate retribuite dipendenti (0 if not found)
+- giornate_altro_personale: A02 - Giornate retribuite altro personale (0 if not found)
+- numero_addetti_equivalenti: {ica_addetti} - Numero addetti equivalenti
+
+**patrimonio:**
+- valore_beni_strumentali: {ica_beni_strumentali} - Valore beni strumentali in proprietà
+
+**isa:**
+- punteggio: {isa_punteggio} - Punteggio ISA finale (1-10 scale)
+- modello_applicato: Codice modello ISA (e.g., "BK04U")
+- ricavi_per_addetto: {iie_ricavi} - Compensi per addetto
+- valore_aggiunto_per_addetto: {iie_va} - Valore aggiunto per addetto
+- reddito_per_addetto: {iie_reddito} - Reddito per addetto
+
+**quadro_rs (Quadro RS - Stato Patrimoniale):**
+NOTE: For professionisti in contabilità semplificata, these fields are typically ALL ZEROS.
+Extract them anyway from pages with "Dati di bilancio" section (RS97-RS114).
+- immobilizzazioni_immateriali: RS97
+- immobilizzazioni_materiali: RS98 (rightmost number on the line)
+- immobilizzazioni_finanziarie: RS99
+- rimanenze: RS100
+- crediti_clienti: RS101
+- altri_crediti: RS102
+- attivita_finanziarie: RS103
+- disponibilita_liquide: RS104
+- ratei_risconti_attivi: RS105
+- totale_attivo: RS106
+- patrimonio_netto: RS107
+- fondi_rischi_oneri: RS108
+- tfr: RS109
+- debiti_banche_breve: RS110
+- debiti_banche_lungo: RS111
+- debiti_fornitori: RS112
+- altri_debiti: RS113
+- ratei_risconti_passivi: RS114
+
+Return the data in this exact JSON structure:
+{json.dumps(self.EXPECTED_STRUCTURE, indent=2)}
+
+IMPORTANT:
+- Numbers must be floats (e.g., 123456.78, not "123.456,78")
+- Convert ALL Italian number formats to standard format
+- If a field is not found, use 0 for numbers or "" for strings
+- Return ONLY valid JSON, no markdown formatting or explanations"""
+
     def extract_from_pdf(self, pdf_path: str, anno: int) -> Dict[str, Any]:
         """
         Extract data from PDF using optimized page filtering
@@ -425,8 +650,12 @@ IMPORTANT:
             # Step 0: Detect entity type
             entity_type = self.detect_entity_type(pdf_path)
             if entity_type == 'PF':
-                logger.warning(f"⚠️ PDF is a Persona Fisica declaration - returning empty structure")
+                logger.warning(f"⚠️ PDF is a Persona Fisica declaration without business income - returning empty structure")
                 return self._build_empty_result(pdf_path, anno, entity_type)
+
+            # PF_RG uses same extraction as SP (Quadro F + ICI codes)
+            # PF_RE uses different extraction (Quadro RE + ICA codes)
+            use_re_prompt = (entity_type == 'PF_RE')
 
             # Step 1: Find relevant pages
             relevant_pages = self.find_relevant_pages(pdf_path)
@@ -445,8 +674,12 @@ IMPORTANT:
             # Step 3: Encode filtered PDF
             pdf_base64 = self._encode_pdf_bytes(filtered_pdf_bytes)
 
-            # Step 4: Build extraction prompt
-            prompt = self._build_extraction_prompt(anno)
+            # Step 4: Build extraction prompt (different for professionisti)
+            if use_re_prompt:
+                logger.info("📋 Using Quadro RE extraction prompt (Libero Professionista)")
+                prompt = self._build_extraction_prompt_re(anno)
+            else:
+                prompt = self._build_extraction_prompt(anno)
 
             # Step 5: Call Claude API
             logger.info(f"🤖 Calling Claude Haiku 4.5 with filtered PDF...")
@@ -490,7 +723,10 @@ IMPORTANT:
                     logger.warning("Extracted data structure is incomplete, filling with defaults")
                     extracted_data = self._merge_with_defaults(extracted_data)
 
-                logger.info(f"✅ Successfully extracted data for year {anno}")
+                # Add entity type metadata
+                extracted_data['_entity_type'] = entity_type
+
+                logger.info(f"✅ Successfully extracted data for year {anno} (entity: {entity_type})")
                 logger.info(f"   Pages analyzed: {sorted(relevant_pages)}")
 
                 return extracted_data

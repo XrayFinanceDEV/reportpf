@@ -715,6 +715,341 @@ class ReportPFCalculator:
         }
 
 
+class ReportPFCalculatorSemplificato:
+    """
+    Calculator for Contabilità Semplificata entities (Quadro RG).
+
+    These entities have NO balance sheet (stato patrimoniale) - all quadro_rs
+    fields are zero. Only ISA Prospetto Economico data is available.
+
+    Computes 8 indicators in 3 sections:
+    - FINANZIARIA: Gestione del Debito, Capacità di Generare Cassa
+    - OPERATIVA: Leva Operativa, Capacità Produttiva Inutilizzata, Leva Produttiva, Produttività Pro Capite
+    - ECONOMICA: Costi Fissi/Variabili, Break Even Point
+    """
+
+    def __init__(self, data_current: Dict[str, Any], data_previous: Dict[str, Any]):
+        self.current = data_current
+        self.previous = data_previous
+
+    def _to_float(self, value: Any) -> float:
+        if isinstance(value, (int, float, Decimal)):
+            return float(value)
+        return 0.0
+
+    # --- FINANZIARIA ---
+
+    def calculate_debt_management(self) -> Dict[str, Any]:
+        """MOL / Oneri Finanziari → Rating AAA-D"""
+        risultati = self.current.get("risultati", {})
+        costi = self.current.get("costi", {})
+
+        mol = self._to_float(risultati.get("mol", 0))
+        interest = self._to_float(costi.get("oneri_finanziari", 0))
+
+        if mol < 0:
+            return {
+                "ratio": None,
+                "rating": DebtRating.NA,
+                "interpretation": "MOL is negative - debt management ratio not applicable"
+            }
+
+        if interest == 0:
+            return {
+                "ratio": float('inf'),
+                "rating": DebtRating.AAA,
+                "interpretation": "No interest expense - excellent position"
+            }
+
+        ratio = mol / interest
+        rating = self._map_ratio_to_rating(ratio)
+
+        return {
+            "ratio": round(ratio, 2),
+            "rating": rating,
+            "mol": round(mol, 2),
+            "interest_expense": round(interest, 2),
+            "interpretation": f"Company can cover interest {ratio:.1f}x - {rating.value} rating"
+        }
+
+    def _map_ratio_to_rating(self, ratio: float) -> DebtRating:
+        if ratio > 12.50:
+            return DebtRating.AAA
+        elif ratio > 9.50:
+            return DebtRating.AA
+        elif ratio > 7.50:
+            return DebtRating.A_PLUS
+        elif ratio > 6.00:
+            return DebtRating.A
+        elif ratio > 4.50:
+            return DebtRating.A_MINUS
+        elif ratio > 4.00:
+            return DebtRating.BBB
+        elif ratio > 3.50:
+            return DebtRating.BB_PLUS
+        elif ratio > 3.00:
+            return DebtRating.BB
+        elif ratio > 2.50:
+            return DebtRating.B_PLUS
+        elif ratio > 2.00:
+            return DebtRating.B
+        elif ratio > 1.50:
+            return DebtRating.B_MINUS
+        elif ratio > 1.25:
+            return DebtRating.CCC_PLUS
+        elif ratio > 0.80:
+            return DebtRating.CCC
+        elif ratio > 0.50:
+            return DebtRating.C
+        else:
+            return DebtRating.D
+
+    def calculate_cash_generation(self) -> Dict[str, Any]:
+        """
+        Capacità di Generare Cassa (simplified, no balance sheet).
+        Formula: MOL - Δ(Beni strumentali)
+        """
+        risultati_curr = self.current.get("risultati", {})
+        patrimonio_curr = self.current.get("patrimonio", {})
+        patrimonio_prev = self.previous.get("patrimonio", {})
+
+        mol = self._to_float(risultati_curr.get("mol", 0))
+        fa_curr = self._to_float(patrimonio_curr.get("valore_beni_strumentali", 0))
+        fa_prev = self._to_float(patrimonio_prev.get("valore_beni_strumentali", 0))
+        delta_fa = fa_curr - fa_prev
+
+        cash_generation = mol - delta_fa
+
+        return {
+            "cash_generation": round(cash_generation, 2),
+            "mol": round(mol, 2),
+            "delta_fixed_assets": round(delta_fa, 2),
+            "fixed_assets_current": round(fa_curr, 2),
+            "fixed_assets_previous": round(fa_prev, 2),
+            "interpretation": "Positive" if cash_generation > 0 else "Negative"
+        }
+
+    # --- OPERATIVA ---
+
+    def calculate_operating_leverage(self) -> Dict[str, Any]:
+        """Leva Operativa: Δ Reddito Operativo / Δ Ricavi"""
+        rev_curr = self._to_float(self.current.get("ricavi", {}).get("ricavi_dichiarati", 0))
+        rev_prev = self._to_float(self.previous.get("ricavi", {}).get("ricavi_dichiarati", 0))
+        delta_revenue = rev_curr - rev_prev
+
+        oi_curr = self._to_float(self.current.get("risultati", {}).get("reddito_operativo", 0))
+        oi_prev = self._to_float(self.previous.get("risultati", {}).get("reddito_operativo", 0))
+        delta_oi = oi_curr - oi_prev
+
+        leverage = delta_oi / delta_revenue if delta_revenue != 0 else 0
+
+        return {
+            "operating_leverage": round(leverage, 4),
+            "delta_operating_income": round(delta_oi, 2),
+            "delta_revenue": round(delta_revenue, 2),
+            "revenue_current": round(rev_curr, 2),
+            "revenue_previous": round(rev_prev, 2),
+            "operating_income_current": round(oi_curr, 2),
+            "operating_income_previous": round(oi_prev, 2),
+            "interpretation": f"1% revenue change → {leverage*100:.2f}% operating income change"
+        }
+
+    def calculate_asset_turnover(self) -> Dict[str, Any]:
+        """Capacità Produttiva Inutilizzata: Beni strumentali / Ricavi"""
+        fa_curr = self._to_float(self.current.get("patrimonio", {}).get("valore_beni_strumentali", 0))
+        rev_curr = self._to_float(self.current.get("ricavi", {}).get("ricavi_dichiarati", 0))
+
+        fa_prev = self._to_float(self.previous.get("patrimonio", {}).get("valore_beni_strumentali", 0))
+        rev_prev = self._to_float(self.previous.get("ricavi", {}).get("ricavi_dichiarati", 0))
+
+        ratio_curr = fa_curr / rev_curr if rev_curr > 0 else 0
+        ratio_prev = fa_prev / rev_prev if rev_prev > 0 else 0
+
+        return {
+            "asset_turnover_current": round(ratio_curr, 2),
+            "asset_turnover_previous": round(ratio_prev, 2),
+            "fixed_assets_current": round(fa_curr, 2),
+            "fixed_assets_previous": round(fa_prev, 2),
+            "revenue_current": round(rev_curr, 2),
+            "revenue_previous": round(rev_prev, 2),
+            "trend": "Improving" if ratio_curr < ratio_prev else "Worsening",
+            "interpretation": f"Company has {ratio_curr:.2f}€ in assets per 1€ revenue"
+        }
+
+    def calculate_production_leverage(self) -> Dict[str, Any]:
+        """Leva Produttiva: Valore Aggiunto / Costo del Personale"""
+        va_curr = self._to_float(self.current.get("risultati", {}).get("valore_aggiunto", 0))
+        labor_curr = self._to_float(self.current.get("costi", {}).get("costo_personale", 0))
+
+        va_prev = self._to_float(self.previous.get("risultati", {}).get("valore_aggiunto", 0))
+        labor_prev = self._to_float(self.previous.get("costi", {}).get("costo_personale", 0))
+
+        ratio_curr = va_curr / labor_curr if labor_curr > 0 else 0
+        ratio_prev = va_prev / labor_prev if labor_prev > 0 else 0
+
+        return {
+            "production_leverage_current": round(ratio_curr, 2),
+            "production_leverage_previous": round(ratio_prev, 2),
+            "value_added_current": round(va_curr, 2),
+            "value_added_previous": round(va_prev, 2),
+            "labor_cost_current": round(labor_curr, 2),
+            "labor_cost_previous": round(labor_prev, 2),
+            "trend_pct": round((ratio_curr - ratio_prev) / ratio_prev * 100, 1) if ratio_prev > 0 else 0,
+            "interpretation": f"Company generates {ratio_curr:.2f}€ value per 1€ labor cost"
+        }
+
+    def calculate_productivity_per_capita(self) -> Dict[str, Any]:
+        """Produttività Pro Capite: Valore Aggiunto / Numero Addetti"""
+        va_curr = self._to_float(self.current.get("risultati", {}).get("valore_aggiunto", 0))
+        emp_curr = self._to_float(self.current.get("personale", {}).get("numero_addetti_equivalenti", 1))
+
+        va_prev = self._to_float(self.previous.get("risultati", {}).get("valore_aggiunto", 0))
+        emp_prev = self._to_float(self.previous.get("personale", {}).get("numero_addetti_equivalenti", 1))
+
+        prod_curr = va_curr / emp_curr if emp_curr > 0 else 0
+        prod_prev = va_prev / emp_prev if emp_prev > 0 else 0
+        change_pct = ((prod_curr - prod_prev) / prod_prev * 100) if prod_prev > 0 else 0
+
+        return {
+            "productivity_current": round(prod_curr, 2),
+            "productivity_previous": round(prod_prev, 2),
+            "change_pct": round(change_pct, 1),
+            "value_added_current": round(va_curr, 2),
+            "value_added_previous": round(va_prev, 2),
+            "employees_current": round(emp_curr, 2),
+            "employees_previous": round(emp_prev, 2),
+            "interpretation": f"Each employee generates {prod_curr:,.0f}€ value added ({change_pct:+.1f}% YoY)"
+        }
+
+    # --- ECONOMICA ---
+
+    def calculate_fixed_variable_costs(self) -> Dict[str, Any]:
+        """
+        Costi Fissi vs Variabili.
+        Fixed: godimento beni terzi + lavoro dipendente + collaboratori + costi residuali + ammortamenti + accantonamenti
+        Variable: esistenze iniziali + acquisti materie prime + servizi - rimanenze finali
+        """
+        costi = self.current.get("costi", {})
+
+        fixed_costs = (
+            self._to_float(costi.get("godimento_beni_terzi", 0)) +
+            self._to_float(costi.get("costo_personale", 0)) +
+            self._to_float(costi.get("spese_collaboratori", 0)) +
+            self._to_float(costi.get("altri_costi", 0)) +
+            self._to_float(costi.get("ammortamenti", 0)) +
+            self._to_float(costi.get("accantonamenti", 0))
+        )
+
+        variable_costs = (
+            self._to_float(costi.get("esistenze_iniziali", 0)) +
+            self._to_float(costi.get("costo_materie_prime", 0)) +
+            self._to_float(costi.get("costo_servizi", 0)) -
+            self._to_float(costi.get("rimanenze_finali", 0))
+        )
+
+        total_costs = fixed_costs + variable_costs
+        fixed_pct = (fixed_costs / total_costs * 100) if total_costs > 0 else 0
+        variable_pct = (variable_costs / total_costs * 100) if total_costs > 0 else 0
+
+        return {
+            "fixed_costs": round(fixed_costs, 2),
+            "variable_costs": round(variable_costs, 2),
+            "total_costs": round(total_costs, 2),
+            "fixed_percentage": round(fixed_pct, 1),
+            "variable_percentage": round(variable_pct, 1),
+            "breakdown": {
+                "rent": round(self._to_float(costi.get("godimento_beni_terzi", 0)), 2),
+                "labor": round(self._to_float(costi.get("costo_personale", 0)), 2),
+                "depreciation": round(self._to_float(costi.get("ammortamenti", 0)), 2),
+                "other_fixed": round(self._to_float(costi.get("altri_costi", 0)), 2),
+                "materials": round(self._to_float(costi.get("costo_materie_prime", 0)), 2),
+                "services": round(self._to_float(costi.get("costo_servizi", 0)), 2)
+            },
+            "interpretation": f"Cost structure: {fixed_pct:.0f}% fixed, {variable_pct:.0f}% variable"
+        }
+
+    def calculate_break_even_point(self) -> Dict[str, Any]:
+        """BEP = Costi Fissi / (1 - (Costi Variabili / Ricavi))"""
+        cost_analysis = self.calculate_fixed_variable_costs()
+        revenue = self._to_float(self.current.get("ricavi", {}).get("ricavi_dichiarati", 0))
+
+        fixed_costs = cost_analysis["fixed_costs"]
+        variable_costs = cost_analysis["variable_costs"]
+
+        if revenue == 0:
+            return {
+                "break_even_point": 0,
+                "margin_of_safety": 0,
+                "interpretation": "Cannot calculate - no revenue"
+            }
+
+        contribution_margin_ratio = 1 - (variable_costs / revenue)
+
+        if contribution_margin_ratio <= 0:
+            return {
+                "break_even_point": float('inf'),
+                "margin_of_safety": -100,
+                "interpretation": "Variable costs exceed revenue - no break-even possible"
+            }
+
+        bep = fixed_costs / contribution_margin_ratio
+        margin_of_safety = ((revenue - bep) / revenue * 100)
+
+        return {
+            "break_even_point": round(bep, 2),
+            "actual_revenue": round(revenue, 2),
+            "margin_of_safety": round(margin_of_safety, 1),
+            "contribution_margin_ratio": round(contribution_margin_ratio, 3),
+            "fixed_costs": round(fixed_costs, 2),
+            "variable_costs": round(variable_costs, 2),
+            "interpretation": self._interpret_bep(margin_of_safety)
+        }
+
+    def _interpret_bep(self, margin: float) -> str:
+        if margin > 30:
+            return f"Excellent safety margin ({margin:.1f}%) - Low risk"
+        elif margin > 20:
+            return f"Good safety margin ({margin:.1f}%) - Moderate risk"
+        elif margin > 10:
+            return f"Adequate safety margin ({margin:.1f}%) - Some risk"
+        elif margin > 0:
+            return f"Thin safety margin ({margin:.1f}%) - High risk"
+        else:
+            return f"Below break-even ({margin:.1f}%) - Critical situation"
+
+    # --- COMPLETE REPORT ---
+
+    def generate_complete_report(self) -> Dict[str, Any]:
+        """
+        Generate simplified report with only ISA-based indicators.
+        Omits valutazione (EM Score/NOPAT) and sostenibilità (ROE) sections
+        which require balance sheet data not available in semplificata.
+        """
+        return {
+            "company_info": {
+                "codice_fiscale": self.current.get("identificativi", {}).get("codice_fiscale"),
+                "ragione_sociale": self.current.get("identificativi", {}).get("ragione_sociale"),
+                "anno_corrente": self.current.get("identificativi", {}).get("anno"),
+                "anno_precedente": self.previous.get("identificativi", {}).get("anno")
+            },
+            "accounting_type": "semplificata",
+            "finanziari": {
+                "debt_management": self.calculate_debt_management(),
+                "cash_generation": self.calculate_cash_generation()
+            },
+            "operativi": {
+                "operating_leverage": self.calculate_operating_leverage(),
+                "asset_turnover": self.calculate_asset_turnover(),
+                "production_leverage": self.calculate_production_leverage(),
+                "productivity": self.calculate_productivity_per_capita()
+            },
+            "economici": {
+                "cost_analysis": self.calculate_fixed_variable_costs(),
+                "break_even": self.calculate_break_even_point()
+            }
+        }
+
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
