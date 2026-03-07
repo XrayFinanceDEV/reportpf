@@ -327,9 +327,9 @@ async def upload_process_biennio(
           - sostenibilita: ROE decomposition
     """
     # Validazione tipo file
-    if not pdf_anno_corrente.filename.endswith('.pdf'):
+    if not pdf_anno_corrente.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Il file anno corrente deve essere un PDF")
-    if not pdf_anno_precedente.filename.endswith('.pdf'):
+    if not pdf_anno_precedente.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Il file anno precedente deve essere un PDF")
 
     temp_corrente = None
