@@ -1,0 +1,29 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+
+# Test PDFs and data (large binary files)
+*.pdf
+*.docx
+tests/debug/
+tests/*.pdf
+tests/*.json
+tests/*.log
+
+# Extracted JSON data
+*.json
+!requirements.txt
+
+# Windows Zone.Identifier files
+*:Zone.Identifier
+
+# Old/archive
+_old/
+
+# Claude project files
+.claude/

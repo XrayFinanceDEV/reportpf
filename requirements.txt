@@ -1,0 +1,20 @@
+# PDF Data Extractor for Società di Persone Report
+# Python >= 3.8
+
+# PDF Processing (V1/V2 - legacy, optional)
+pdfplumber>=0.11.0
+
+# FastAPI Server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# HTTP Client for testing
+requests>=2.31.0
+
+# V3 Extractor - Claude Haiku 4.5
+anthropic>=0.40.0
+
+# Optional: Alternative PDF libraries if needed
+# pypdf2>=3.0.0
+# PyMuPDF>=1.23.0
