@@ -1,8 +1,28 @@
-# Report PF - Società di Persone
+# Report PF - Analisi Finanziaria Dichiarazioni dei Redditi
 
 ## Overview
 
-Report PF is a comprehensive financial analysis report for "Società di Persone" (partnerships) in Italy. It extracts data from tax declarations (Modello Redditi PF) for two consecutive years and provides detailed economic, patrimonial, and financial analysis.
+Report PF is a comprehensive financial analysis report for Italian tax declarations (Modello Redditi). It extracts data from two consecutive years and provides detailed economic, patrimonial, and financial analysis.
+
+### Supported Entity Types
+
+| Type | Description | Declaration | Income Quadro | ISA Codes |
+|------|-------------|-------------|---------------|-----------|
+| **SP** | Società di Persone (partnerships) | Modello Redditi SP | Quadro RG | ICI codes |
+| **PF_RG** | Persona Fisica - Ditta Individuale | Modello Redditi PF | Quadro RG | ICI codes |
+| **PF_RE** | Persona Fisica - Libero Professionista | Modello Redditi PF | Quadro RE | ICA codes |
+| **PF** | Persona Fisica (no business income) | Modello Redditi PF | — | — |
+
+Entity type is auto-detected by scanning PDF content for RPF markers, Quadro RE/RG headers, and ICA/ICI code presence.
+
+### Accounting Types
+
+The system detects two accounting regimes:
+
+- **Ordinaria** (full accounting): Has balance sheet data in Quadro RS. Full report with all 4 sections including valutazione and sostenibilità.
+- **Semplificata** (simplified accounting): No balance sheet — all 18 Quadro RS fields are zero. Report uses only ISA Prospetto Economico data with 8 simplified indicators.
+
+Detection is automatic via `detect_accounting_type()` which checks if all Quadro RS balance sheet values are zero.
 
 ## Backend Integration
 
@@ -111,6 +131,8 @@ Each year contains:
 - ratei_risconti_passivi
 
 ## Report Structure
+
+### Ordinaria Reports (Full)
 
 The report is organized into **4 logical sections**:
 
@@ -282,6 +304,50 @@ The report is organized into **4 logical sections**:
 - Bordered sections with highlights
 - 4-column grid for additional metrics
 
+### Semplificata Reports (Simplified)
+
+When contabilità semplificata is detected (all Quadro RS = 0), the report uses `ReportPFCalculatorSemplificato` and produces only **3 indicator sections** with **8 ISA-based indicators**:
+
+#### Indicatori Finanziari (2 indicators)
+1. **Gestione del Debito** — MOL / Interessi passivi (debt coverage ratio)
+2. **Capacità di Generare Cassa** — MOL - ΔBeni strumentali (simplified cash generation)
+
+#### Indicatori Operativi (4 indicators)
+3. **Leva Operativa** — Costi fissi / Costi variabili
+4. **Capacità Produttiva Inutilizzata** — (Ricavi potenziali - Ricavi effettivi) / Ricavi potenziali
+5. **Leva Produttiva** — Ricavi / Beni strumentali
+6. **Produttività Pro Capite** — Valore aggiunto / Numero addetti
+
+#### Indicatori Economici (2 indicators)
+7. **Costi Fissi / Variabili** — Breakdown of cost structure
+8. **Break Even Point** — Costi fissi / (1 - Costi variabili / Ricavi)
+
+**Omitted sections** (require balance sheet data):
+- Valutazione (EM Score, NOPAT, Enterprise Value)
+- Sostenibilità (ROE, ROA, leverage ratios)
+
+## ICA Codes (Liberi Professionisti)
+
+PF_RE entities use ICA codes instead of ICI codes from the ISA Prospetto Economico:
+
+| Code (2024) | Code (2023) | Description |
+|-------------|-------------|-------------|
+| ICA001 | ICA00001 | Compensi dichiarati |
+| ICA003 | ICA00003 | Totale compensi |
+| ICA007 | ICA00007 | Compensi corrisposti a terzi |
+| ICA013 | ICA00013 | Valore aggiunto |
+| ICA014 | ICA00014 | Spese lavoro dipendente |
+| ICA015 | ICA00015 | Compensi collaboratori |
+| ICA016 | ICA00016 | MOL |
+| ICA017 | ICA00017 | Ammortamenti |
+| ICA018 | ICA00018 | Reddito operativo |
+| ICA020 | ICA00020 | Interessi passivi |
+| ICA024 | ICA00024 | Reddito |
+| ICA027 | ICA00027 | Numero addetti |
+| ICA028 | ICA00028 | Valore beni strumentali |
+
+Note: 2024 declarations use 3-digit format (ICA001), 2023 use 5-digit format (ICA00001).
+
 ## Test Data
 
 Test data is stored in `/lib/dati-test-pf.ts` using real Bar Mazzola data:
@@ -309,18 +375,35 @@ Test data is stored in `/lib/dati-test-pf.ts` using real Bar Mazzola data:
 - ISA score drop: -4.6 points (critical decline)
 - Employee reduction: -1.29 FTE
 
+### Verified Test PDFs
+
+| PDF | Entity Type | Accounting | Result |
+|-----|-------------|------------|--------|
+| H.DEA DELLA SALUTE SAS 2025/2024 | SP | semplificata | Pass |
+| G&M TERMOIDRAULICA 2024/2023 | SP | semplificata | Pass |
+| TOPPI RPF 2024/2023 | PF_RG | semplificata | Pass |
+| RADICE RPF 2024/2023 | PF_RE | semplificata | Pass |
+| Bar Mazzola SP 2024/2023 | SP | ordinaria | Pass |
+
 ## File Structure
 
 ```
-/app/reportpf/page.tsx          # Report PF demo page
+# Backend (reportpf/)
+reportpf/
+  api_server.py                    # FastAPI server with entity/accounting detection
+  extdichiarazione_v3_optimized.py # PDF extraction (SP, PF_RE, PF_RG detection)
+  formule_report_pf.py             # ReportPFCalculator + ReportPFCalculatorSemplificato
+
+# Frontend
+/app/reportpf/page.tsx             # Report PF demo page
 /components/reports/
-  report-pf.tsx                  # Main reorganized report component
-  report-pf-improved.tsx         # Alternative version (uses ReportPFComplete type)
-  pf-kpi-card.tsx                # KPI card component
-  pf-charts.tsx                  # Chart components (comparison & pie)
-  download-pdf-button.tsx        # PDF download functionality
-/lib/dati-test-pf.ts             # Test data (Bar Mazzola)
-/types/report-pf.ts              # TypeScript types
+  report-pf.tsx                    # Main reorganized report component
+  report-pf-improved.tsx           # Alternative version (uses ReportPFComplete type)
+  pf-kpi-card.tsx                  # KPI card component
+  pf-charts.tsx                    # Chart components (comparison & pie)
+  download-pdf-button.tsx          # PDF download functionality
+/lib/dati-test-pf.ts               # Test data (Bar Mazzola)
+/types/report-pf.ts                # TypeScript types
 ```
 
 ## Key Calculations
@@ -502,8 +585,10 @@ Test data verified:
 
 ## Status
 
-**Version**: 1.0
-**Last Updated**: 2025-11-25
-**Status**: ✅ Complete and Tested
-**Backend Integration**: ✅ Connected
-**Test Data**: ✅ Bar Mazzola (2023-2024)
+**Version**: 2.0
+**Last Updated**: 2026-03-07
+**Status**: Complete and Tested
+**Backend Integration**: Connected
+**Supported Entities**: SP, PF_RG, PF_RE
+**Accounting Types**: Ordinaria (full), Semplificata (ISA-only)
+**Test Data**: Bar Mazzola, H.DEA, G&M Termoidraulica, TOPPI, RADICE
