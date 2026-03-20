@@ -85,6 +85,17 @@ class DichiarazioneExtractorV3Optimized:
     # Combined target codes for page filtering
     TARGET_CODES = CODES_COMMON | CODES_2024 | CODES_2023
 
+    # Keyword-based page detection (for PDFs without field codes)
+    # These help find relevant pages even when ICI/ICA codes are absent
+    PAGE_KEYWORDS = {
+        'PROSPETTO ECONOMICO', 'VALORE AGGIUNTO', 'MARGINE OPERATIVO',
+        'REDDITO OPERATIVO', 'PUNTEGGIO', 'AFFIDABILIT',
+        'ELEMENTI CONTABILI', 'BENI STRUMENTALI',
+        'QUADRO RS', 'QUADRO RF', 'QUADRO RG', 'QUADRO RE',
+        'DATI DI BILANCIO', 'STATO PATRIMONIALE',
+        'GIORNATE RETRIBUITE', 'PERSONALE ADDETTO',
+    }
+
     # Entity type markers for detection
     # "RPF" = Redditi Persone Fisiche (personal tax declaration) - appears on page 1
     # SP declarations don't have a single reliable marker on page 1 (some have reversed text)
@@ -266,6 +277,175 @@ class DichiarazioneExtractorV3Optimized:
         logger.info("Detected accounting type: ORDINARIA (quadro_rs has non-zero values)")
         return "ordinaria"
 
+    def detect_available_sections(self, pdf_path: str) -> Dict[str, Any]:
+        """
+        Scan the entire PDF to detect which data sections are actually present.
+        Returns a dict describing what was found, used to generate warnings.
+        """
+        sections = {
+            'has_ici_codes': False,
+            'has_ica_codes': False,
+            'has_f_codes': False,
+            'has_re_codes': False,
+            'has_rs_codes': False,
+            'has_isa_prospetto': False,
+            'has_isa_punteggio': False,
+            'has_personnel_data': False,
+            'has_rf_codes': False,
+            'has_isa_exclusion': False,
+            'has_spaced_text': False,
+            'detected_year': None,
+            'ici_codes_found': [],
+            'f_codes_found': [],
+        }
+
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text() or ''
+                    text_upper = text.upper()
+
+                    # Detect spaced-out text (common in some PDF generators)
+                    if re.search(r'P\s+E\s+R\s+I\s+O\s+D\s+O', text_upper):
+                        sections['has_spaced_text'] = True
+
+                    # Year detection (normal + spaced)
+                    if not sections['detected_year']:
+                        # Normal: "Periodo d'imposta 2023"
+                        m = re.search(r"[Pp]eriodo\s+d.imposta\s+(\d{4})", text)
+                        if m:
+                            sections['detected_year'] = int(m.group(1))
+                        else:
+                            # Spaced: "P e r io d o d 'i m p o s t a 2 0 2 3"
+                            m = re.search(r'(?:P\s*E\s*R\s*I\s*O\s*D\s*O|Periodo).*?(\d)\s+(\d)\s+(\d)\s+(\d)', text, re.IGNORECASE)
+                            if m:
+                                sections['detected_year'] = int(m.group(1) + m.group(2) + m.group(3) + m.group(4))
+
+                    # Check for ICI codes (both 3-digit and 5-digit)
+                    ici = re.findall(r'\bICI\d{3,5}\b', text)
+                    if ici:
+                        sections['has_ici_codes'] = True
+                        sections['ici_codes_found'].extend(ici)
+
+                    # Check for ICA codes
+                    if re.search(r'\bICA\d{3,5}\b', text):
+                        sections['has_ica_codes'] = True
+
+                    # Check for F-codes (Quadro F - ISA elements contabili)
+                    # Only count F01-F21 as real Quadro F codes (not F24 which is a tax payment form reference)
+                    f_codes = re.findall(r'\bF(?:0[1-9]|1\d|2[01])\b', text)
+                    if f_codes:
+                        sections['has_f_codes'] = True
+                        sections['f_codes_found'].extend(f_codes)
+
+                    # Check for Quadro RF (contabilita' ordinaria - different from Quadro F)
+                    if re.search(r'\bQUADRO RF\b', text_upper) or re.search(r'\bRF[12]\b', text):
+                        sections['has_rf_codes'] = True
+
+                    # Check for ISA exclusion
+                    if re.search(r'ISA.*cause di esclusione', text, re.IGNORECASE):
+                        sections['has_isa_exclusion'] = True
+
+                    # Check for Quadro RE codes
+                    if re.search(r'\bRE[1-9]\d?\b', text):
+                        sections['has_re_codes'] = True
+
+                    # Check for RS codes (balance sheet)
+                    if re.search(r'\bRS(?:9[7-9]|1[01]\d|12[0-3])\b', text):
+                        sections['has_rs_codes'] = True
+
+                    # Check for ISA Prospetto Economico
+                    if 'PROSPETTO ECONOMICO' in text_upper or re.search(r'\bICI01[147]01\b', text) or re.search(r'\bICI01[147]\b', text):
+                        sections['has_isa_prospetto'] = True
+
+                    # Check for ISA punteggio
+                    if re.search(r'\bI{1,3}SAAFF\b', text) or ('PUNTEGGIO' in text_upper and 'ISA' in text_upper):
+                        sections['has_isa_punteggio'] = True
+
+                    # Check for personnel data
+                    if re.search(r'\bA0[12]\b', text) or 'GIORNATE RETRIBUITE' in text_upper:
+                        sections['has_personnel_data'] = True
+
+        except Exception as e:
+            logger.error(f"Error detecting available sections: {e}")
+
+        return sections
+
+    def _build_warnings(self, sections: Dict[str, Any], entity_type: str) -> List[str]:
+        """
+        Build warning messages based on which sections are missing from the PDF.
+        """
+        warnings = []
+
+        # ISA exclusion with no ISA data actually present
+        has_isa_data = sections['has_ici_codes'] or sections['has_ica_codes'] or sections['has_isa_prospetto']
+        if sections.get('has_isa_exclusion') and not has_isa_data:
+            warnings.append(
+                "Il contribuente ha una causa di esclusione ISA e nessun dato ISA presente nel PDF. "
+                "I campi 'risultati' (valore aggiunto, MOL, reddito operativo) e 'isa' (punteggio, indicatori) "
+                "saranno basati solo sui dati del Quadro F/RF, con possibile imprecisione."
+            )
+
+        if entity_type in ('SP', 'PF_RG'):
+            if not has_isa_data:
+                if not sections['has_isa_prospetto'] and not (sections.get('has_isa_exclusion') and not has_isa_data):
+                    warnings.append(
+                        "ISA Prospetto Economico non trovato nel PDF. "
+                        "I campi 'risultati' (valore_aggiunto, MOL, reddito_operativo) e "
+                        "'isa' (punteggio, ricavi_per_addetto, etc.) potrebbero essere zero o imprecisi. "
+                        "Il PDF potrebbe non includere il modulo ISA."
+                    )
+                if not sections['has_isa_punteggio']:
+                    warnings.append(
+                        "Punteggio ISA (ISAAFF/IIISAAFF) non trovato nel PDF. "
+                        "Il campo 'isa.punteggio' sara' zero."
+                    )
+
+            if not sections['has_f_codes']:
+                if sections.get('has_rf_codes'):
+                    warnings.append(
+                        "Quadro RF (contabilita' ordinaria) rilevato al posto del Quadro F. "
+                        "I dati di ricavi e costi verranno estratti dal Quadro RF. "
+                        "L'estrazione potrebbe essere meno precisa."
+                    )
+                else:
+                    warnings.append(
+                        "Quadro F (Elementi Contabili) non trovato nel PDF. "
+                        "I campi 'ricavi' e 'costi' potrebbero essere zero o imprecisi."
+                    )
+
+        elif entity_type == 'PF_RE':
+            if not sections['has_ica_codes']:
+                warnings.append(
+                    "Codici ICA (Prospetto Economico professionisti) non trovati nel PDF. "
+                    "I campi 'risultati' e 'isa' potrebbero essere zero o imprecisi."
+                )
+            if not sections['has_re_codes']:
+                warnings.append(
+                    "Quadro RE (redditi lavoro autonomo) non trovato nel PDF. "
+                    "I campi 'ricavi' e 'costi' potrebbero essere zero."
+                )
+
+        if not sections['has_rs_codes']:
+            warnings.append(
+                "Quadro RS - Dati di bilancio (RS97-RS114) non trovato nel PDF. "
+                "I campi 'quadro_rs' (stato patrimoniale) saranno zero."
+            )
+
+        if not sections['has_personnel_data']:
+            warnings.append(
+                "Dati personale (A01/A02) non trovati nel PDF. "
+                "I campi 'personale.giornate_dipendenti' e 'giornate_altro_personale' saranno zero."
+            )
+
+        if sections['has_spaced_text']:
+            warnings.append(
+                "Il PDF contiene testo con spaziatura anomala (caratteri separati da spazi). "
+                "L'estrazione potrebbe essere meno precisa per alcune sezioni."
+            )
+
+        return warnings
+
     def _build_empty_result(self, pdf_path: str, anno: int, entity_type: str) -> Dict[str, Any]:
         """
         Build a mostly-empty result structure for unsupported entity types (e.g. persone fisiche).
@@ -314,10 +494,143 @@ class DichiarazioneExtractorV3Optimized:
 
         return result
 
+    def analyze_pdf(self, pdf_path: str) -> tuple:
+        """
+        Combined method: detect available sections AND find relevant pages in a single PDF pass.
+        Returns (sections_dict, relevant_pages_set).
+        This avoids scanning the PDF twice.
+        """
+        sections = {
+            'has_ici_codes': False,
+            'has_ica_codes': False,
+            'has_f_codes': False,
+            'has_re_codes': False,
+            'has_rs_codes': False,
+            'has_rf_codes': False,
+            'has_isa_exclusion': False,
+            'has_isa_prospetto': False,
+            'has_isa_punteggio': False,
+            'has_personnel_data': False,
+            'has_spaced_text': False,
+            'detected_year': None,
+            'ici_codes_found': [],
+            'f_codes_found': [],
+        }
+        relevant_pages = {1}  # Always include first page
+
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+                logger.info(f"Analyzing {total_pages} pages...")
+
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text() or ''
+                    text_upper = text.upper()
+
+                    # --- Section detection ---
+
+                    # Detect spaced-out text
+                    if not sections['has_spaced_text'] and re.search(r'P\s+E\s+R\s+I\s+O\s+D\s+O', text_upper):
+                        sections['has_spaced_text'] = True
+
+                    # Year detection (normal + spaced)
+                    if not sections['detected_year']:
+                        m = re.search(r"[Pp]eriodo\s+d.imposta\s+(\d{4})", text)
+                        if m:
+                            sections['detected_year'] = int(m.group(1))
+                        else:
+                            m = re.search(r'(?:P\s*E\s*R\s*I\s*O\s*D\s*O|Periodo).*?(\d)\s+(\d)\s+(\d)\s+(\d)', text, re.IGNORECASE)
+                            if m:
+                                sections['detected_year'] = int(m.group(1) + m.group(2) + m.group(3) + m.group(4))
+
+                    # ICI codes
+                    ici = re.findall(r'\bICI\d{3,5}\b', text)
+                    if ici:
+                        sections['has_ici_codes'] = True
+                        sections['ici_codes_found'].extend(ici)
+
+                    # ICA codes
+                    if re.search(r'\bICA\d{3,5}\b', text):
+                        sections['has_ica_codes'] = True
+
+                    # F-codes (Quadro F, F01-F21 only)
+                    f_codes = re.findall(r'\bF(?:0[1-9]|1\d|2[01])\b', text)
+                    if f_codes:
+                        sections['has_f_codes'] = True
+                        sections['f_codes_found'].extend(f_codes)
+
+                    # Quadro RF
+                    if re.search(r'\bQUADRO RF\b', text_upper) or re.search(r'\bRF[12]\b', text):
+                        sections['has_rf_codes'] = True
+
+                    # ISA exclusion
+                    if re.search(r'ISA.*cause di esclusione', text, re.IGNORECASE):
+                        sections['has_isa_exclusion'] = True
+
+                    # Quadro RE codes
+                    if re.search(r'\bRE[1-9]\d?\b', text):
+                        sections['has_re_codes'] = True
+
+                    # RS codes (balance sheet)
+                    if re.search(r'\bRS(?:9[7-9]|1[01]\d|12[0-3])\b', text):
+                        sections['has_rs_codes'] = True
+
+                    # ISA Prospetto Economico
+                    if 'PROSPETTO ECONOMICO' in text_upper or re.search(r'\bICI01[147]01\b', text) or re.search(r'\bICI01[147]\b', text):
+                        sections['has_isa_prospetto'] = True
+
+                    # ISA punteggio
+                    if re.search(r'\bI{1,3}SAAFF\b', text) or ('PUNTEGGIO' in text_upper and 'ISA' in text_upper):
+                        sections['has_isa_punteggio'] = True
+
+                    # Personnel data
+                    if re.search(r'\bA0[12]\b', text) or 'GIORNATE RETRIBUITE' in text_upper:
+                        sections['has_personnel_data'] = True
+
+                    # --- Page relevance detection ---
+
+                    found = False
+                    # Strategy 1: field codes
+                    for code in self.TARGET_CODES:
+                        if re.search(rf'\b{re.escape(code)}\b', text):
+                            relevant_pages.add(page_num)
+                            found = True
+                            break
+
+                    if not found:
+                        # Strategy 2: keywords
+                        for keyword in self.PAGE_KEYWORDS:
+                            if keyword in text_upper:
+                                relevant_pages.add(page_num)
+                                found = True
+                                break
+
+                    if not found:
+                        # Strategy 3: spaced-out codes
+                        text_compact = re.sub(r'\s+', '', text_upper)
+                        for code in self.TARGET_CODES:
+                            if code in text_compact:
+                                relevant_pages.add(page_num)
+                                break
+
+                logger.info(f"Found {len(relevant_pages)} relevant pages out of {total_pages}")
+                logger.info(f"   Pages to analyze: {sorted(relevant_pages)}")
+
+        except Exception as e:
+            logger.error(f"Error analyzing PDF: {e}")
+            relevant_pages = set(range(1, 31))
+
+        return sections, relevant_pages
+
     def find_relevant_pages(self, pdf_path: str) -> Set[int]:
         """
-        Scan PDF to find pages containing our target field codes
-        Returns set of page numbers (1-indexed)
+        Scan PDF to find pages containing our target field codes or relevant keywords.
+        Returns set of page numbers (1-indexed).
+
+        Uses three detection strategies:
+        1. Field code matching (ICI, ICA, F01, RS97, etc.)
+        2. Keyword matching (PROSPETTO ECONOMICO, VALORE AGGIUNTO, etc.)
+        3. Spaced-text code matching (for PDFs with character-spaced text)
         """
         relevant_pages = set()
 
@@ -331,18 +644,40 @@ class DichiarazioneExtractorV3Optimized:
 
                 for page_num, page in enumerate(pdf.pages, start=1):
                     text = page.extract_text() or ""
+                    text_upper = text.upper()
 
-                    # Check if this page contains any of our target codes
+                    # Strategy 1: Check for target field codes
+                    found_code = False
                     for code in self.TARGET_CODES:
-                        # Look for the code as a standalone field identifier
-                        # Pattern: code followed by space/tab and number, or in a table
                         pattern = rf'\b{re.escape(code)}\b'
                         if re.search(pattern, text):
                             relevant_pages.add(page_num)
                             logger.debug(f"  Page {page_num}: Found code {code}")
-                            break  # Found at least one code, page is relevant
+                            found_code = True
+                            break
 
-                logger.info(f"✅ Found {len(relevant_pages)} relevant pages out of {total_pages}")
+                    if found_code:
+                        continue
+
+                    # Strategy 2: Check for relevant keywords
+                    for keyword in self.PAGE_KEYWORDS:
+                        if keyword in text_upper:
+                            relevant_pages.add(page_num)
+                            logger.debug(f"  Page {page_num}: Found keyword '{keyword}'")
+                            break
+
+                    # Strategy 3: Check for spaced-out field codes
+                    # e.g., "I C I 0 1 1" or "F 0 1" in PDFs with character spacing
+                    text_compact = re.sub(r'\s+', '', text_upper)
+                    if not found_code and page_num not in relevant_pages:
+                        for code in self.TARGET_CODES:
+                            if code in text_compact:
+                                # Verify it's not a false positive by checking nearby context
+                                relevant_pages.add(page_num)
+                                logger.debug(f"  Page {page_num}: Found spaced code {code}")
+                                break
+
+                logger.info(f"Found {len(relevant_pages)} relevant pages out of {total_pages}")
                 logger.info(f"   Pages to analyze: {sorted(relevant_pages)}")
 
                 return relevant_pages
@@ -642,23 +977,39 @@ IMPORTANT:
 
     def extract_from_pdf(self, pdf_path: str, anno: int) -> Dict[str, Any]:
         """
-        Extract data from PDF using optimized page filtering
+        Extract data from PDF using optimized page filtering.
+        Includes _warnings list in result for missing sections.
         """
         try:
-            logger.info(f"🔍 Optimized extraction from {pdf_path} for year {anno}")
+            logger.info(f"Optimized extraction from {pdf_path} for year {anno}")
 
-            # Step 0: Detect entity type
+            # Step 0a: Detect entity type
             entity_type = self.detect_entity_type(pdf_path)
             if entity_type == 'PF':
-                logger.warning(f"⚠️ PDF is a Persona Fisica declaration without business income - returning empty structure")
-                return self._build_empty_result(pdf_path, anno, entity_type)
+                logger.warning(f"PDF is a Persona Fisica declaration without business income - returning empty structure")
+                result = self._build_empty_result(pdf_path, anno, entity_type)
+                result['_warnings'] = [
+                    "Dichiarazione Persone Fisiche senza reddito d'impresa o lavoro autonomo. "
+                    "Nessun dato finanziario aziendale disponibile."
+                ]
+                return result
+
+            # Step 0b: Detect available sections and find relevant pages in a single pass
+            sections, relevant_pages = self.analyze_pdf(pdf_path)
+            warnings = self._build_warnings(sections, entity_type)
+
+            # Use detected year if auto-detect from filename failed
+            if sections['detected_year'] and sections['detected_year'] != anno:
+                logger.info(f"Year from PDF content ({sections['detected_year']}) differs from parameter ({anno}), using PDF content year")
+                anno = sections['detected_year']
+
+            if warnings:
+                for w in warnings:
+                    logger.warning(f"  {w}")
 
             # PF_RG uses same extraction as SP (Quadro F + ICI codes)
             # PF_RE uses different extraction (Quadro RE + ICA codes)
             use_re_prompt = (entity_type == 'PF_RE')
-
-            # Step 1: Find relevant pages
-            relevant_pages = self.find_relevant_pages(pdf_path)
 
             # Step 2: Extract only those pages
             logger.info(f"📄 Extracting {len(relevant_pages)} pages...")
@@ -726,8 +1077,21 @@ IMPORTANT:
                 # Add entity type metadata
                 extracted_data['_entity_type'] = entity_type
 
-                logger.info(f"✅ Successfully extracted data for year {anno} (entity: {entity_type})")
+                # Add warnings about missing sections
+                if warnings:
+                    extracted_data['_warnings'] = warnings
+
+                # Post-extraction validation: check if key fields are actually zero
+                # and add specific warnings
+                post_warnings = self._post_extraction_warnings(extracted_data, sections)
+                if post_warnings:
+                    existing = extracted_data.get('_warnings', [])
+                    extracted_data['_warnings'] = existing + post_warnings
+
+                logger.info(f"Successfully extracted data for year {anno} (entity: {entity_type})")
                 logger.info(f"   Pages analyzed: {sorted(relevant_pages)}")
+                if extracted_data.get('_warnings'):
+                    logger.warning(f"   Warnings: {len(extracted_data['_warnings'])}")
 
                 return extracted_data
 
@@ -760,6 +1124,46 @@ IMPORTANT:
         merge_dict(result, data)
         return result
 
+    def _post_extraction_warnings(self, data: Dict[str, Any], sections: Dict[str, Any]) -> List[str]:
+        """
+        After extraction, check if critical fields are zero and generate targeted warnings.
+        This catches cases where Claude couldn't find data even though we sent the pages.
+        """
+        warnings = []
+
+        ricavi = data.get('ricavi', {}).get('ricavi_dichiarati', 0)
+        reddito = data.get('risultati', {}).get('reddito_impresa', 0)
+        va = data.get('risultati', {}).get('valore_aggiunto', 0)
+        mol = data.get('risultati', {}).get('mol', 0)
+        punteggio = data.get('isa', {}).get('punteggio', 0)
+        totale_attivo = data.get('quadro_rs', {}).get('totale_attivo', 0)
+
+        if ricavi == 0:
+            warnings.append(
+                "Ricavi dichiarati estratti come zero. "
+                "Verificare manualmente il Quadro F/RE della dichiarazione."
+            )
+
+        if va == 0 and mol == 0 and reddito == 0:
+            warnings.append(
+                "Tutti i risultati economici (valore aggiunto, MOL, reddito) sono zero. "
+                "Il Prospetto Economico ISA potrebbe essere assente dal PDF."
+            )
+
+        if punteggio == 0:
+            warnings.append(
+                "Punteggio ISA non estratto (valore zero). "
+                "Il PDF potrebbe non contenere il risultato ISA."
+            )
+
+        if totale_attivo == 0 and sections.get('has_rs_codes'):
+            warnings.append(
+                "Totale attivo zero nonostante la presenza del Quadro RS. "
+                "Verificare manualmente i dati di bilancio."
+            )
+
+        return warnings
+
     def estrai_dati_input(self, pdf_path: Optional[str] = None, anno: Optional[int] = None) -> Dict[str, Any]:
         """
         Main extraction method (compatible with V3 interface)
@@ -774,10 +1178,30 @@ IMPORTANT:
 
         # Auto-detect year from filename if not provided
         if anno is None:
-            import re
             match = re.search(r'(202[0-9])', pdf_path)
-            anno = int(match.group(1)) if match else 2024
-            logger.info(f"Auto-detected year: {anno}")
+            if match:
+                anno = int(match.group(1))
+                logger.info(f"Auto-detected year from filename: {anno}")
+            else:
+                # Try to detect from PDF content (handles files like report453_current.pdf)
+                try:
+                    with pdfplumber.open(pdf_path) as pdf:
+                        for page in pdf.pages[:3]:
+                            text = page.extract_text() or ''
+                            m = re.search(r"[Pp]eriodo\s+d.imposta\s+(\d{4})", text)
+                            if m:
+                                anno = int(m.group(1))
+                                break
+                            # Spaced text: "2 0 2 3"
+                            m = re.search(r'(?:PERIODO|Periodo).*?(\d)\s+(\d)\s+(\d)\s+(\d)', text, re.IGNORECASE)
+                            if m:
+                                anno = int(m.group(1) + m.group(2) + m.group(3) + m.group(4))
+                                break
+                except Exception:
+                    pass
+                if anno is None:
+                    anno = 2024
+                logger.info(f"Auto-detected year from PDF content: {anno}")
 
         return self.extract_from_pdf(pdf_path, anno)
 

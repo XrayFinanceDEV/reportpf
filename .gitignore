@@ -9,9 +9,11 @@ __pycache__/
 
 # Test PDFs and data (large binary files)
 *.pdf
+*.PDF
 *.docx
-tests/debug/
 tests/*.pdf
+tests/*.PDF
+tests/*.docx
 tests/*.json
 tests/*.log
 

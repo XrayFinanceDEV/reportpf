@@ -394,7 +394,8 @@ class ExtractionMetadata:
 def validate_and_enrich(extracted_data: Dict[str, Any],
                         extraction_time_ms: float = 0) -> Dict[str, Any]:
     """
-    Validates extracted data and adds metadata
+    Validates extracted data and adds metadata.
+    Merges _warnings from the extractor into validation warnings.
 
     Usage:
         data = extractor.estrai_dati_input()
@@ -402,6 +403,14 @@ def validate_and_enrich(extracted_data: Dict[str, Any],
     """
     metadata_gen = ExtractionMetadata()
     metadata = metadata_gen.generate_metadata(extracted_data, extraction_time_ms)
+
+    # Merge extractor warnings into validation warnings
+    extractor_warnings = extracted_data.get('_warnings', [])
+    if extractor_warnings:
+        validation = metadata.get('validation', {})
+        existing_warnings = validation.get('warnings', [])
+        validation['warnings'] = extractor_warnings + existing_warnings
+        metadata['validation'] = validation
 
     return {
         **extracted_data,
