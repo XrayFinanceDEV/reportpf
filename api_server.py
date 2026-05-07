@@ -445,16 +445,21 @@ async def upload_process_biennio(
         print(f"📋 Accounting type: {accounting_type} (corrente={accounting_type_corrente}, precedente={accounting_type_precedente})")
 
         # Calcola indicatori usando il calculator appropriato
+        # Determine entity type for tax rate calculation
+        entity_type = dati_corrente.get('_entity_type', 'SP')
+
         try:
             if is_semplificata:
                 calculator = ReportPFCalculatorSemplificato(
                     data_current=dati_corrente,
-                    data_previous=dati_precedente
+                    data_previous=dati_precedente,
+                    entity_type=entity_type
                 )
             else:
                 calculator = ReportPFCalculator(
                     data_2023=dati_corrente,
-                    data_2022=dati_precedente
+                    data_2022=dati_precedente,
+                    entity_type=entity_type
                 )
             complete_report = calculator.generate_complete_report()
         except Exception as calc_error:

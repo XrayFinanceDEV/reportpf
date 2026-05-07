@@ -78,6 +78,12 @@ class DichiarazioneExtractorV3Optimized:
         'RS47', 'RS48', 'RS49', 'RS50',
         'RS118', 'RS119', 'RS120', 'RS121', 'RS122', 'RS123',
 
+        # Quadro RN - IRPEF (Persone Fisiche only)
+        'RN26',
+
+        # Quadro RV - Addizionali (Persone Fisiche only)
+        'RV2', 'RV10',
+
         # Personnel
         'A01', 'A02'
     }
@@ -92,6 +98,8 @@ class DichiarazioneExtractorV3Optimized:
         'REDDITO OPERATIVO', 'PUNTEGGIO', 'AFFIDABILIT',
         'ELEMENTI CONTABILI', 'BENI STRUMENTALI',
         'QUADRO RS', 'QUADRO RF', 'QUADRO RG', 'QUADRO RE',
+        'QUADRO RN', 'QUADRO RV',
+        'IRPEF NETTA', 'ADDIZIONALE REGIONALE', 'ADDIZIONALE COMUNALE',
         'DATI DI BILANCIO', 'STATO PATRIMONIALE',
         'GIORNATE RETRIBUITE', 'PERSONALE ADDETTO',
     }
@@ -166,6 +174,11 @@ class DichiarazioneExtractorV3Optimized:
             "debiti_fornitori": 0.0,
             "altri_debiti": 0.0,
             "ratei_risconti_passivi": 0.0
+        },
+        "imposte": {
+            "irpef_netta": 0.0,
+            "addizionale_regionale": 0.0,
+            "addizionale_comunale": 0.0
         }
     }
 
@@ -511,6 +524,8 @@ class DichiarazioneExtractorV3Optimized:
             'has_isa_prospetto': False,
             'has_isa_punteggio': False,
             'has_personnel_data': False,
+            'has_rn_codes': False,
+            'has_rv_codes': False,
             'has_spaced_text': False,
             'detected_year': None,
             'ici_codes_found': [],
@@ -582,6 +597,14 @@ class DichiarazioneExtractorV3Optimized:
                     # ISA punteggio
                     if re.search(r'\bI{1,3}SAAFF\b', text) or ('PUNTEGGIO' in text_upper and 'ISA' in text_upper):
                         sections['has_isa_punteggio'] = True
+
+                    # Quadro RN (IRPEF)
+                    if re.search(r'\bRN\d{1,2}\b', text) or 'QUADRO RN' in text_upper:
+                        sections['has_rn_codes'] = True
+
+                    # Quadro RV (Addizionali)
+                    if re.search(r'\bRV\d{1,2}\b', text) or 'QUADRO RV' in text_upper:
+                        sections['has_rv_codes'] = True
 
                     # Personnel data
                     if re.search(r'\bA0[12]\b', text) or 'GIORNATE RETRIBUITE' in text_upper:
@@ -827,6 +850,13 @@ LIABILITIES (Passivo):
 - altri_debiti: RS113 - Altri debiti
 - ratei_risconti_passivi: RS114 - Ratei e risconti passivi
 
+**imposte (Quadro RN + RV - Imposte effettive):**
+NOTE: Only present in Persone Fisiche declarations (PF_RG, PF_RE). For Società di Persone (SP) these will be 0.
+Extract from Quadro RN (calcolo IRPEF) and Quadro RV (addizionali):
+- irpef_netta: RN26 - IRPEF netta (imposta netta dopo detrazioni e crediti)
+- addizionale_regionale: RV2 - Addizionale regionale all'IRPEF
+- addizionale_comunale: RV10 - Addizionale comunale all'IRPEF
+
 Return the data in this exact JSON structure:
 {json.dumps(self.EXPECTED_STRUCTURE, indent=2)}
 
@@ -966,6 +996,12 @@ Extract them anyway from pages with "Dati di bilancio" section (RS97-RS114).
 - altri_debiti: RS113
 - ratei_risconti_passivi: RS114
 
+**imposte (Quadro RN + RV - Imposte effettive):**
+Extract from Quadro RN (calcolo IRPEF) and Quadro RV (addizionali):
+- irpef_netta: RN26 - IRPEF netta (imposta netta dopo detrazioni e crediti)
+- addizionale_regionale: RV2 - Addizionale regionale all'IRPEF
+- addizionale_comunale: RV10 - Addizionale comunale all'IRPEF
+
 Return the data in this exact JSON structure:
 {json.dumps(self.EXPECTED_STRUCTURE, indent=2)}
 
@@ -1081,6 +1117,18 @@ IMPORTANT:
                 if warnings:
                     extracted_data['_warnings'] = warnings
 
+                # Fallback: calculate MOL from Valore Aggiunto - Costo Personale
+                # when extraction failed to find MOL directly
+                risultati = extracted_data.get('risultati', {})
+                mol = float(risultati.get('mol', 0))
+                if mol == 0:
+                    va = float(risultati.get('valore_aggiunto', 0))
+                    costo_pers = float(extracted_data.get('costi', {}).get('costo_personale', 0))
+                    if va != 0:
+                        calculated_mol = va - costo_pers
+                        extracted_data['risultati']['mol'] = calculated_mol
+                        logger.info(f"MOL fallback: calculated as VA ({va:,.0f}) - Costo Personale ({costo_pers:,.0f}) = {calculated_mol:,.0f}")
+
                 # Post-extraction validation: check if key fields are actually zero
                 # and add specific warnings
                 post_warnings = self._post_extraction_warnings(extracted_data, sections)
@@ -1106,7 +1154,7 @@ IMPORTANT:
     def _validate_structure(self, data: Dict[str, Any]) -> bool:
         """Validate that extracted data has the expected structure"""
         required_sections = ["identificativi", "ricavi", "costi", "risultati",
-                           "personale", "patrimonio", "isa", "quadro_rs"]
+                           "personale", "patrimonio", "isa", "quadro_rs", "imposte"]
         return all(section in data for section in required_sections)
 
     def _merge_with_defaults(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1161,6 +1209,20 @@ IMPORTANT:
                 "Totale attivo zero nonostante la presenza del Quadro RS. "
                 "Verificare manualmente i dati di bilancio."
             )
+
+        # Check imposte for PF declarations
+        entity_type = data.get('_entity_type', '')
+        if entity_type in ('PF_RG', 'PF_RE'):
+            imposte = data.get('imposte', {})
+            irpef = imposte.get('irpef_netta', 0)
+            add_reg = imposte.get('addizionale_regionale', 0)
+            add_com = imposte.get('addizionale_comunale', 0)
+            if irpef == 0 and add_reg == 0 and add_com == 0:
+                warnings.append(
+                    "Imposte (IRPEF netta, addizionali) tutte zero per dichiarazione PF. "
+                    "Il Quadro RN/RV potrebbe essere assente dal PDF. "
+                    "Verrà utilizzato il tax rate stimato del 30%."
+                )
 
         return warnings
 

@@ -43,22 +43,56 @@ class ReportPFCalculator:
     Calcolatore completo per Report PF - Società di Persone
     """
 
-    def __init__(self, data_2023: Dict[str, Any], data_2022: Dict[str, Any]):
+    DEFAULT_TAX_RATE = 0.30
+
+    def __init__(self, data_2023: Dict[str, Any], data_2022: Dict[str, Any],
+                 entity_type: str = 'SP'):
         """
         Initialize with 2-year data
 
         Args:
             data_2023: Most recent year data
             data_2022: Previous year data
+            entity_type: 'SP', 'PF_RG', or 'PF_RE'
         """
         self.current = data_2023
         self.previous = data_2022
+        self.entity_type = entity_type
+        self.tax_rate = self._calculate_tax_rate()
 
     def _to_float(self, value: Any) -> float:
         """Safe conversion to float"""
         if isinstance(value, (int, float, Decimal)):
             return float(value)
         return 0.0
+
+    def _calculate_tax_rate(self) -> float:
+        """
+        Calculate effective tax rate from extracted imposte data (Quadro RN/RV).
+
+        For PF (PF_RG, PF_RE): uses actual IRPEF + addizionali / reddito impresa.
+        For SP: always returns DEFAULT_TAX_RATE (IRPEF is on individual partners).
+        Fallback to DEFAULT_TAX_RATE if data is missing or reddito <= 0.
+        """
+        if self.entity_type == 'SP':
+            return self.DEFAULT_TAX_RATE
+
+        imposte = self.current.get("imposte", {})
+        irpef = self._to_float(imposte.get("irpef_netta", 0))
+        add_reg = self._to_float(imposte.get("addizionale_regionale", 0))
+        add_com = self._to_float(imposte.get("addizionale_comunale", 0))
+        imposte_totali = irpef + add_reg + add_com
+
+        reddito = self._to_float(
+            self.current.get("risultati", {}).get("reddito_impresa", 0)
+        )
+
+        if imposte_totali <= 0 or reddito <= 0:
+            return self.DEFAULT_TAX_RATE
+
+        effective_rate = imposte_totali / reddito
+        # Cap at reasonable bounds (0% - 60%)
+        return min(max(effective_rate, 0.0), 0.60)
 
     # ========================================================================
     # SECTION 1: VALUTAZIONE DI IMPRESA (Business Valuation)
@@ -191,8 +225,8 @@ class ReportPFCalculator:
         discount_rate = self.map_pd_to_discount_rate(pd)
 
         # Calculate average NOPAT (Operating Income after tax)
-        # Assuming 30% tax rate
-        tax_rate = 0.30
+        # Uses effective tax rate from Quadro RN/RV for PF, 30% estimate for SP
+        tax_rate = self.tax_rate
 
         nopat_2023 = self._to_float(self.current.get("risultati", {}).get("reddito_operativo", 0)) * (1 - tax_rate)
         nopat_2022 = self._to_float(self.previous.get("risultati", {}).get("reddito_operativo", 0)) * (1 - tax_rate)
@@ -644,7 +678,7 @@ class ReportPFCalculator:
         roa = oi_projected / total_assets if total_assets > 0 else 0
         interest_rate = interest / debt if debt > 0 else 0
         leverage = debt / equity if equity > 0 else 0
-        tax_rate = 0.30
+        tax_rate = self.tax_rate
 
         # ROE Decomposition
         roe = (roa + (roa - interest_rate) * leverage) * (1 - tax_rate)
@@ -696,6 +730,11 @@ class ReportPFCalculator:
                 "anno_corrente": self.current.get("identificativi", {}).get("anno"),
                 "anno_precedente": self.previous.get("identificativi", {}).get("anno")
             },
+            "tax_rate": {
+                "value": round(self.tax_rate * 100, 2),
+                "source": "effective" if self.entity_type != 'SP' and self.tax_rate != self.DEFAULT_TAX_RATE else "estimated",
+                "entity_type": self.entity_type
+            },
             "valutazione": self.calculate_nopat_valuation(),
             "finanziari": {
                 "debt_management": self.calculate_debt_management(),
@@ -728,14 +767,40 @@ class ReportPFCalculatorSemplificato:
     - ECONOMICA: Costi Fissi/Variabili, Break Even Point
     """
 
-    def __init__(self, data_current: Dict[str, Any], data_previous: Dict[str, Any]):
+    DEFAULT_TAX_RATE = 0.30
+
+    def __init__(self, data_current: Dict[str, Any], data_previous: Dict[str, Any],
+                 entity_type: str = 'SP'):
         self.current = data_current
         self.previous = data_previous
+        self.entity_type = entity_type
+        self.tax_rate = self._calculate_tax_rate()
 
     def _to_float(self, value: Any) -> float:
         if isinstance(value, (int, float, Decimal)):
             return float(value)
         return 0.0
+
+    def _calculate_tax_rate(self) -> float:
+        """Calculate effective tax rate (same logic as ReportPFCalculator)."""
+        if self.entity_type == 'SP':
+            return self.DEFAULT_TAX_RATE
+
+        imposte = self.current.get("imposte", {})
+        irpef = self._to_float(imposte.get("irpef_netta", 0))
+        add_reg = self._to_float(imposte.get("addizionale_regionale", 0))
+        add_com = self._to_float(imposte.get("addizionale_comunale", 0))
+        imposte_totali = irpef + add_reg + add_com
+
+        reddito = self._to_float(
+            self.current.get("risultati", {}).get("reddito_impresa", 0)
+        )
+
+        if imposte_totali <= 0 or reddito <= 0:
+            return self.DEFAULT_TAX_RATE
+
+        effective_rate = imposte_totali / reddito
+        return min(max(effective_rate, 0.0), 0.60)
 
     # --- FINANZIARIA ---
 
@@ -1033,6 +1098,11 @@ class ReportPFCalculatorSemplificato:
                 "anno_precedente": self.previous.get("identificativi", {}).get("anno")
             },
             "accounting_type": "semplificata",
+            "tax_rate": {
+                "value": round(self.tax_rate * 100, 2),
+                "source": "effective" if self.entity_type != 'SP' and self.tax_rate != self.DEFAULT_TAX_RATE else "estimated",
+                "entity_type": self.entity_type
+            },
             "finanziari": {
                 "debt_management": self.calculate_debt_management(),
                 "cash_generation": self.calculate_cash_generation()
