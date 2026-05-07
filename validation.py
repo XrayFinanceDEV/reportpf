@@ -302,19 +302,21 @@ class ExtractionValidator:
                     f"⚠️ Reddito Operativo > MOL: RO={reddito_op:,.0f}, MOL={mol:,.0f}"
                 )
 
-            # Check Reddito Impresa is reasonably close to Reddito Operativo - Oneri Finanziari
-            # Note: Tax declarations can have extraordinary items and adjustments, so allow 10% variance
+            # Check Reddito Impresa = Reddito Operativo + Altri Componenti Positivi - Oneri Finanziari
+            # Altri componenti (F02+F03+F05) are part of the income flowing into reddito_impresa
+            # but not into reddito_operativo. Allow 10% variance for extraordinary items.
             reddito_impresa = float(data.get('risultati', {}).get('reddito_impresa', 0))
             oneri_finanziari = float(data.get('costi', {}).get('oneri_finanziari', 0))
+            altri_componenti = float(data.get('ricavi', {}).get('altri_componenti_positivi', 0))
 
-            reddito_impresa_calc = reddito_op - oneri_finanziari
+            reddito_impresa_calc = reddito_op + altri_componenti - oneri_finanziari
 
             if abs(reddito_impresa - reddito_impresa_calc) < max(1, abs(reddito_impresa) * 0.10):
                 checks_passed += 1
             else:
                 self.warnings.append(
                     f"⚠️ Reddito Impresa discrepanza significativa (>10%): "
-                    f"Estratto={reddito_impresa:,.0f}, Calc (RO-OnFin)={reddito_impresa_calc:,.0f}"
+                    f"Estratto={reddito_impresa:,.0f}, Calc (RO+AltriComp-OnFin)={reddito_impresa_calc:,.0f}"
                 )
 
         except Exception as e:

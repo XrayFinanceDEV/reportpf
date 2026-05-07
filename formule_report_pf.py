@@ -141,8 +141,15 @@ class ReportPFCalculator:
 
     def map_em_to_pd(self, em_score: float) -> float:
         """
-        Map EM Score to Probability of Default (PD)
-        Based on table from schema
+        Map EM Score to annual Probability of Default (PD, %).
+
+        Calibrated for Italian SMEs: la fascia EM 2-4 è stata addolcita rispetto
+        alle bande Altman originali, perché le PMI italiane operano spesso con
+        working capital negativo strutturale grazie ad affidamenti bancari
+        rotativi (linee revolving) — un pattern penalizzato in modo eccessivo
+        dal modello USA. Le fasce alte (EM ≥ 5.5) restano vicine all'originale.
+
+        Returns PD as a percentage (e.g. 5.0 means 5%).
         """
         if em_score >= 8.15:
             return 0.01
@@ -157,33 +164,33 @@ class ReportPFCalculator:
         elif em_score >= 6.65:
             return 0.07
         elif em_score >= 6.40:
-            return 0.09
+            return 0.10
         elif em_score >= 6.25:
-            return 0.14
+            return 0.15
         elif em_score >= 5.85:
-            return 0.21
+            return 0.30
         elif em_score >= 5.65:
-            return 0.31
+            return 0.50
         elif em_score >= 5.25:
-            return 0.52
+            return 0.80
         elif em_score >= 4.95:
-            return 0.86
+            return 1.20
         elif em_score >= 4.75:
-            return 1.43
+            return 1.70
         elif em_score >= 4.40:
-            return 2.03
+            return 2.20
         elif em_score >= 4.15:
-            return 2.88
+            return 2.80
         elif em_score >= 3.75:
-            return 4.09
+            return 3.50
         elif em_score >= 3.20:
-            return 6.94
+            return 4.50
         elif em_score >= 2.50:
-            return 11.78
+            return 6.00
         elif em_score >= 1.75:
-            return 14.00
+            return 8.00
         else:
-            return 20.00
+            return 12.00
 
     def map_pd_to_discount_rate(self, pd: float) -> float:
         """
@@ -422,7 +429,10 @@ class ReportPFCalculator:
         """
         Calculate Operating Leverage
 
-        Formula: Δ Operating Income / Δ Revenue
+        Formula: (Δ Operating Income / OI_prev) / (Δ Revenue / Revenue_prev)
+
+        When |Δ Revenue / Revenue_prev| < 1%, the ratio is unstable and is
+        reported as N/D instead of an exploded value.
         """
         # Revenue change
         rev_curr = self._to_float(self.current.get("ricavi", {}).get("ricavi_dichiarati", 0))
@@ -434,20 +444,33 @@ class ReportPFCalculator:
         oi_prev = self._to_float(self.previous.get("risultati", {}).get("reddito_operativo", 0))
         delta_oi = oi_curr - oi_prev
 
-        if delta_revenue == 0:
-            leverage = 0
+        revenue_change_pct = (delta_revenue / rev_prev) if rev_prev else 0
+
+        if rev_prev <= 0 or abs(revenue_change_pct) < 0.01:
+            leverage = None
+            interpretation = (
+                "N/D - Variazione ricavi troppo piccola "
+                f"({revenue_change_pct * 100:.2f}%) per un calcolo significativo"
+            )
         else:
-            leverage = delta_oi / delta_revenue
+            leverage = (delta_oi / oi_prev) / revenue_change_pct if oi_prev else None
+            if leverage is None:
+                interpretation = "N/D - Reddito operativo precedente nullo"
+            else:
+                interpretation = (
+                    f"1% di variazione ricavi → {leverage:.2f}% di variazione "
+                    f"reddito operativo"
+                )
 
         return {
-            "operating_leverage": round(leverage, 4),
+            "operating_leverage": round(leverage, 4) if leverage is not None else None,
             "delta_operating_income": round(delta_oi, 2),
             "delta_revenue": round(delta_revenue, 2),
             "revenue_2023": round(rev_curr, 2),
             "revenue_2022": round(rev_prev, 2),
             "operating_income_2023": round(oi_curr, 2),
             "operating_income_2022": round(oi_prev, 2),
-            "interpretation": f"1% revenue change → {leverage*100:.2f}% operating income change"
+            "interpretation": interpretation,
         }
 
     def calculate_asset_turnover(self) -> Dict[str, Any]:
@@ -697,12 +720,26 @@ class ReportPFCalculator:
                 "operating_income_2022": round(oi_2022, 2),
                 "growth": round(oi_trend, 2)
             },
-            "interpretation": self._interpret_roe(roe),
+            "interpretation": self._interpret_roe(
+                roe, net_income=net_income, roa=roa, interest_rate=interest_rate
+            ),
             "sustainability": "Sustainable" if roe > 0 else "Not sustainable"
         }
 
-    def _interpret_roe(self, roe: float) -> str:
-        """Interpret ROE"""
+    def _interpret_roe(
+        self,
+        roe: float,
+        net_income: float = 0.0,
+        roa: float = 0.0,
+        interest_rate: float = 0.0,
+    ) -> str:
+        """Interpret ROE.
+
+        A negative ROE on a profitable company (net_income > 0) indicates
+        destructive financial leverage: the cost of debt exceeds the return on
+        assets, so leverage shrinks shareholder returns instead of amplifying
+        them. This is structurally different from being loss-making.
+        """
         roe_pct = roe * 100
         if roe_pct > 15:
             return f"Excellent ROE ({roe_pct:.1f}%) - Strong returns"
@@ -713,6 +750,11 @@ class ReportPFCalculator:
         elif roe_pct > 0:
             return f"Low ROE ({roe_pct:.1f}%) - Weak returns"
         else:
+            if net_income > 0 and interest_rate > roa:
+                return (
+                    f"Negative ROE ({roe_pct:.1f}%) - Leva finanziaria distruttiva "
+                    f"(costo del debito {interest_rate*100:.1f}% > ROA {roa*100:.1f}%)"
+                )
             return f"Negative ROE ({roe_pct:.1f}%) - Loss-making"
 
     # ========================================================================
@@ -897,7 +939,11 @@ class ReportPFCalculatorSemplificato:
     # --- OPERATIVA ---
 
     def calculate_operating_leverage(self) -> Dict[str, Any]:
-        """Leva Operativa: Δ Reddito Operativo / Δ Ricavi"""
+        """Leva Operativa (DOL): (Δ Reddito Operativo / OI_prev) / (Δ Ricavi / Ricavi_prev)
+
+        Quando |Δ Ricavi / Ricavi_prev| < 1% il rapporto è instabile e si
+        restituisce N/D invece di un valore esploso.
+        """
         rev_curr = self._to_float(self.current.get("ricavi", {}).get("ricavi_dichiarati", 0))
         rev_prev = self._to_float(self.previous.get("ricavi", {}).get("ricavi_dichiarati", 0))
         delta_revenue = rev_curr - rev_prev
@@ -906,17 +952,33 @@ class ReportPFCalculatorSemplificato:
         oi_prev = self._to_float(self.previous.get("risultati", {}).get("reddito_operativo", 0))
         delta_oi = oi_curr - oi_prev
 
-        leverage = delta_oi / delta_revenue if delta_revenue != 0 else 0
+        revenue_change_pct = (delta_revenue / rev_prev) if rev_prev else 0
+
+        if rev_prev <= 0 or abs(revenue_change_pct) < 0.01:
+            leverage = None
+            interpretation = (
+                "N/D - Variazione ricavi troppo piccola "
+                f"({revenue_change_pct * 100:.2f}%) per un calcolo significativo"
+            )
+        else:
+            leverage = (delta_oi / oi_prev) / revenue_change_pct if oi_prev else None
+            if leverage is None:
+                interpretation = "N/D - Reddito operativo precedente nullo"
+            else:
+                interpretation = (
+                    f"1% di variazione ricavi → {leverage:.2f}% di variazione "
+                    f"reddito operativo"
+                )
 
         return {
-            "operating_leverage": round(leverage, 4),
+            "operating_leverage": round(leverage, 4) if leverage is not None else None,
             "delta_operating_income": round(delta_oi, 2),
             "delta_revenue": round(delta_revenue, 2),
             "revenue_current": round(rev_curr, 2),
             "revenue_previous": round(rev_prev, 2),
             "operating_income_current": round(oi_curr, 2),
             "operating_income_previous": round(oi_prev, 2),
-            "interpretation": f"1% revenue change → {leverage*100:.2f}% operating income change"
+            "interpretation": interpretation,
         }
 
     def calculate_asset_turnover(self) -> Dict[str, Any]:
