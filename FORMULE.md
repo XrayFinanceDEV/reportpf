@@ -243,11 +243,18 @@ EM Score = 3.25 + 6.56 × WC_ratio + 6.72 × Prof_ratio
 | ≥ 7.00 | 0.04 | ≥ 4.15 | 2.88 |
 | ≥ 6.85 | 0.05 | ≥ 3.75 | 4.09 |
 | ≥ 6.65 | 0.07 | ≥ 3.20 | 6.94 |
-| ≥ 6.40 | 0.09 | ≥ 2.50 | 11.78 |
-| ≥ 6.25 | 0.14 | ≥ 1.75 | 14.00 |
-| ≥ 5.85 | 0.21 | < 1.75 | 20.00 |
+| ≥ 6.40 | 0.09 | ≥ 2.50 | **6.00** |
+| ≥ 6.25 | 0.14 | ≥ 1.75 | **8.00** |
+| ≥ 5.85 | 0.21 | < 1.75 | **12.00** |
 | ≥ 5.65 | 0.31 | | |
 | ≥ 5.25 | 0.52 | | |
+
+> **Ricalibrazione 2026-05** per PMI italiane: le ultime tre fasce (EM < 2.50)
+> sono state ridotte rispetto al modello Altman classico (11.78 / 14 / 20 → 6 / 8 / 12).
+> Motivo: l'Altman EM-Score è troppo aggressivo per imprese italiane che operano
+> strutturalmente con working capital negativo per via degli affidamenti bancari
+> rotativi (RS110), portando PD anche del 14% su aziende con liquidità sana e
+> oneri sostenibili. Le bande sono ora più realistiche per il tessuto PMI.
 
 #### 3.1.3 Tasso di sconto R°
 
@@ -342,16 +349,28 @@ FCF = Operating CF − ΔWC − Capex
 
 ### 3.3 Sezione OPERATIVA
 
-#### 3.3.1 Operating Leverage — Leva operativa
+#### 3.3.1 Operating Leverage — Leva operativa (DOL)
 
 `formule_report_pf.py:387-417`
 
-```
-ΔRicavi  = ICI001_corrente − ICI001_precedente
-ΔRO      = ICI017_corrente − ICI017_precedente
+Formula corretta del **Degree of Operating Leverage** (variazione % del reddito
+operativo per ogni 1% di variazione dei ricavi):
 
-Leva Operativa = ΔRO / ΔRicavi
 ```
+%ΔRicavi = (Ricavi_corr − Ricavi_prec) / Ricavi_prec
+%ΔRO     = (RO_corr − RO_prec) / RO_prec
+
+DOL = %ΔRO / %ΔRicavi
+```
+
+**Stability check**: se `|%ΔRicavi| < 1%` la formula esplode (denominatore
+quasi nullo), quindi la funzione restituisce `None` con interpretazione:
+> "N/D - Variazione ricavi troppo piccola (X%)"
+
+> **Correzione 2026-05**: in precedenza la formula calcolava il rapporto
+> sui valori assoluti (`ΔRO / ΔRicavi`) trattato come percentuale, producendo
+> valori distorti (es. -20.97 per piccoli Δrev su STURLA). Ora si usa il
+> rapporto di variazioni percentuali, formula standard finanziaria.
 
 #### 3.3.2 Asset Turnover — Capacità produttiva
 
@@ -463,9 +482,21 @@ Interpretazione:
 | > 10% | Good |
 | > 5% | Fair |
 | > 0% | Low |
-| ≤ 0% | Negative — Loss-making |
+| ≤ 0% | Negative — vedi sotto |
 
 **Sostenibilità** = "Sustainable" se ROE > 0, altrimenti "Not sustainable".
+
+> **Affinamento ROE negativo (2026-05)** — `_interpret_roe()` ora distingue
+> due casi quando `ROE < 0`:
+> - Se `net_income > 0 AND interest_rate > ROA` → leva finanziaria distruttiva
+>   (l'azienda è profittevole ma il costo del debito > rendimento dell'attivo,
+>   quindi la leva sta erodendo il ritorno dei soci):
+>   *"Negative ROE (X%) - Leva finanziaria distruttiva (costo del debito X% > ROA Y%)"*
+> - Altrimenti → l'azienda è in perdita: *"Loss-making"*.
+>
+> Motivo: in precedenza qualunque ROE negativo riceveva l'etichetta
+> "Loss-making" anche su aziende profittevoli con leva sbilanciata, fuorviando
+> chi leggeva il report.
 
 ---
 
@@ -542,9 +573,10 @@ Valori "hardcoded" nelle formule che potrebbero richiedere configurazione estern
 | **Tax Rate** (NOPAT/ROE) | Effettivo da RN26+RV2+RV10 | `formule_report_pf.py:_calculate_tax_rate()` | Per PF: calcolato da imposte reali. Per SP: 30% stimato. Fallback 30% se dati mancanti. Cap 0-60% |
 | **Risk-free rate** | 3.5% | `formule_report_pf.py:160` | Rendimento medio BTP — da aggiornare |
 | **Credit spreads** | 2/4/6/8/10/15% | `formule_report_pf.py:163-174` | Bande grossolane |
-| **Tabella EM→PD** | 20 fasce | `formule_report_pf.py:113-152` | Calibrazione Altman |
+| **Tabella EM→PD** | 20 fasce, **ricalibrata** 2026-05 | `formule_report_pf.py:113-152` | Code (EM<2.5) ridotte da 11.78/14/20% a 6/8/12% per PMI italiane con WC strutturalmente negativo (vedi §3.1.2) |
 | **Soglie rating debito** | 16 fasce AAA→D | `formule_report_pf.py:272-301` | Da specifica schema |
 | **Soglie BEP margin** | 30/20/10/0% | `formule_report_pf.py:601-610` | Giudizi qualitativi |
+| **DOL stability threshold** | 1% | `formule_report_pf.py:387-417` | Sotto questa variazione % dei ricavi, DOL = N/D |
 
 ---
 
@@ -674,20 +706,37 @@ Status: `[CRITICO, DEBOLE, NELLA MEDIA, BUONO, ECCELLENTE][score-1]`
 | < 6 | SOTTO MEDIA |
 | ≤ 0 | N.D. |
 
-### 8.7 Imposte e Tax Rate effettivo
+### 8.7 Imposte, Tax Rate effettivo e Reddito Netto
 
-`report-pf.tsx:455-472` — usa i dati reali estratti dal Quadro RN/RV.
+`report-pf.tsx:506-580` — gestisce due casi distinti (PF vs SP).
+
+#### Caso PF (PF_RG, PF_RE) — imposte estratte dal PDF
+```
+Imposte_t = RN26_t + RV2_t + RV10_t              # dati reali estratti
+Tax Rate % = indicatori.tax_rate.value           # effettivo dal backend
+Tax Rate precedente = Imposte_prec / Reddito_prec × 100
+```
+
+#### Caso SP (Società di Persone) — imposte stimate
+Le dichiarazioni SP **non contengono** RN26/RV2/RV10 (l'IRPEF è in capo ai
+singoli soci sulle loro PF). Per evitare il display "0 €" in entrambi gli anni:
 
 ```
-Imposte corrente = RN26 + RV2 + RV10             # dati estratti dal PDF
-Tax Rate % = indicatori.tax_rate.value            # dal backend (effettivo per PF, 30% per SP)
+useEstimate = (Imposte_corr_estratte + Imposte_prec_estratte) ≤ 0
+imposte_t   = useEstimate ? max(0, reddito_t × tax_rate) : RN26+RV2+RV10
 ```
 
-Per l'anno precedente, se disponibili i dati `imposte`:
+Quando `useEstimate = true`, le card mostrano i suffissi
+`"COSTI PER IMPOSTE SUL REDDITO (stimato)"` e `"TAX RATE (stimato)"`
+tramite la prop `isEstimated` di `<FocusTributario>`.
+
+#### Reddito Netto (sempre derivato)
 ```
-Tax Rate precedente = (RN26_prec + RV2_prec + RV10_prec) / Reddito Impresa_prec × 100
+Reddito Netto_t = Reddito d'Impresa_t − Imposte_t
 ```
-Fallback al tax rate corrente se dati non disponibili.
+
+Sostituisce il vecchio comportamento dove "Reddito Netto" coincideva con
+Reddito d'Impresa e l'eventuale costo fiscale veniva ignorato.
 
 ### 8.8 ADEGUATI ASSETTI (formula completa)
 
@@ -725,19 +774,28 @@ Indice = partC × partD
 
 ### 8.9 DuPont ROE Analysis (Analisi Stato Patrimoniale)
 
-`pf-analisi-stato-patrimoniale.tsx:726-756` — stessa decomposizione DuPont del backend (§3.5.1) ma su dati anno corrente (non proiettati).
+`pf-analisi-stato-patrimoniale.tsx:726-758` — stessa decomposizione DuPont del backend (§3.5.1) ma su dati anno corrente (non proiettati).
 
 ```
-ROA % = ICI017 / RS106 × 100                    # reddito operativo / totale attivo
+ROA %             = ICI017 / RS106 × 100                # reddito op / totale attivo
 Tasso Interesse % = ICI019 / (RS110 + RS111) × 100
-Spread % = ROA − Tasso Interesse
-Leverage = (RS110 + RS111) / RS107
-Spread × Leverage Effect % = Spread × Leverage / 100
-ROE % = [ROA + (Spread × Leverage)] × (1 − tax_rate / 100)
-Tax Rate = indicatori.tax_rate.value (effettivo per PF, 30% stimato per SP)
+Spread %          = ROA − Tasso Interesse
+Leverage          = (RS110 + RS111) / RS107
+Spread × Leverage = Spread × Leverage                   # in percentage points
+ROE pre-tax %     = ROA + Spread × Leverage
+ROE post-tax %    = ROE pre-tax × (1 − tax_rate / 100)
+Tax Rate          = indicatori.tax_rate.value           # effettivo per PF, 30% stimato per SP
 ```
 
 Visualizzazione decomposizione: `[ROA + (Spread × Leverage)] × (1 - Tax Rate) = ROE`
+
+> **Bug fix 2026-05**: il valore mostrato nella card "SPREAD × LEVERAGE"
+> in precedenza divideva il prodotto per 100 per il display e poi lo
+> rimoltiplicava per 100 nel calcolo del ROE. Le due operazioni si
+> annullavano sul ROE finale (corretto per caso) ma il box mostrava
+> lo SPREAD × LEVERAGE 100 volte più piccolo, arrotondato a `0.00%`
+> per qualunque valore < 100pp. Ora il display è in unità coerenti
+> (percentage points) con il resto della formula.
 
 > **Nota**: il backend (§3.5.1) usa la stessa formula DuPont ma con RO *proiettato* (trend lineare). Il frontend usa RO dell'anno corrente. La decomposizione e il tax rate sono ora allineati.
 
@@ -773,7 +831,97 @@ Trend % = (val_corr − val_prec) / |val_prec| × 100   # uso |.| per gestire ne
 
 ---
 
-## 9. File chiave
+## 9. Validazioni cross-formula
+
+`reportpf/validation.py` esegue check di coerenza sui dati estratti.
+
+### 9.1 Reddito d'Impresa — coerenza CE
+
+`validation.py:305-318`
+
+```
+reddito_impresa_calc = reddito_operativo
+                     + altri_componenti_positivi      # F02 + F03 + F05
+                     − oneri_finanziari
+
+assert |reddito_impresa_calc − F20| < tolleranza
+```
+
+> **Fix 2026-05**: la formula prima ometteva `altri_componenti_positivi`
+> (F02+F03+F05) producendo falsi positivi su dichiarazioni con plusvalenze
+> o sopravvenienze attive. Aggiunto il termine, aderente alla logica del
+> Modello Redditi.
+
+---
+
+## 10. AI Context Helper (chat + commenti generati)
+
+Tutti i numeri visualizzati nel report PF vengono raccolti in un **singolo
+oggetto strutturato** consumato da entrambi gli endpoint AI.
+
+### 10.1 File
+
+```
+formulafinance/lib/extract-pf-context.ts
+├── extractPFContext(reportData)        → PFChatContext (object)
+└── formatPFContextAsText(ctx)          → string (markdown per system prompt)
+```
+
+### 10.2 Sezioni del context (PFChatContext)
+
+| Chiave | Contenuto |
+|---|---|
+| `company` | Anagrafica (RS, CF, P.IVA) |
+| `conto_economico[anno]` | Ricavi, VA, MOL, EBITDA, RO, RI + ROS, EBITDA margin |
+| `costi[anno]` | 11 voci di costo + oneri finanziari/ricavi% |
+| `variazioni` | Δ Ricavi, Δ EBITDA, Δ Reddito (assolute + %) |
+| `stato_patrimoniale[anno]` | Attivo, Passivo, equity ratio, D/E |
+| `capitale_circolante` | CCN biennale + Δ |
+| `fiscale` | Imposte estratte/stimate, tax rate, reddito netto |
+| `personale[anno]` | Addetti, costo personale |
+| `isa[anno]` | Punteggio, modello, ricavi/VA/reddito per addetto |
+| `valutazione` | EM-Score, PD, discount rate, NOPAT, valuation |
+| `redditivita` | DuPont: ROA, interest, spread, leverage, ROE pre/post-tax |
+| `debito` | Debt management ratio, rating, costo medio debito |
+| `cash` | OCF, ΔWC, CAPEX, FCF |
+| `operativo` | DOL, asset turnover, production leverage, productivity |
+| `economico` | Cost analysis breakdown, break-even, margine sicurezza |
+| `sostenibilita` | ROE, RO proiettato, label sostenibilità |
+| `ai_comments_existing` | (opzionale) commenti già generati per coerenza |
+
+### 10.3 Robustezza unità
+
+- **DuPont ratios** (ROA, interest, leverage, spread): sempre **ricalcolati
+  dai dati grezzi** (CE + Quadro RS), mai letti da `indicatori.sostenibilita.components`,
+  perché le unità del backend sono incoerenti tra versioni (a volte fraction, a
+  volte percent).
+- Helper `toPct(v)` con auto-detect: `|v| > 1 → già percent`, altrimenti
+  `v × 100`. Applicato a PD, discount rate, ROE, margin of safety,
+  contribution margin.
+
+### 10.4 Consumo
+
+| Endpoint | File | Uso |
+|---|---|---|
+| Chatbot report | `app/api/chat/route.ts` (`buildPFSystemPrompt`) | Context completo come system prompt |
+| Generazione 5 commenti AI | `app/api/reports/[id]/generate-pf-comments/route.ts` | Stesso context + 5 domande del titolare |
+
+**Dimensione tipica**: ~4.5KB / ~1.1k token solo dati. System prompt
+completo ≤2k token, ben sotto il budget.
+
+### 10.5 Ordering della valutazione (ai05)
+
+Il prompt della domanda *"Quanto vale la mia azienda?"* impone ordine fisso:
+
+1. **Metodo principale — reddituale / multipli**: range 3-5× EBITDA, floor = patrimonio netto.
+2. **Metodo teorico — DCF / cashflow**: presentato come "valore teorico"
+   con avvertenza esplicita che nei bilanci di società di persone i flussi di
+   cassa possono includere **rivalutazioni statistiche non monetarie**, quindi
+   il DCF non è la valutazione principale.
+
+---
+
+## 11. File chiave
 
 ### Backend
 ```
@@ -793,15 +941,18 @@ reportpf/
 
 ### Frontend
 ```
-formulafinance/components/reports/
-├── report-pf.tsx                       # Componente master + EBITDA + 4 equilibri + tax rate
-├── pf-andamento-economico.tsx          # Trend e incidenza ricavi
-├── pf-stato-patrimoniale.tsx           # PN % attivo
-├── pf-focus-finanziario.tsx            # Liquidità, oneri %, PD
-├── pf-focus-tributario.tsx             # ISA score, tax rate
-├── pf-adeguati-assetti.tsx             # **Formula Adeguati Assetti (solo frontend)**
-├── pf-analisi-conto-economico.tsx      # Tabelle CE
-├── pf-analisi-stato-patrimoniale.tsx   # **DuPont ROE + Tasso Interesse + DSC**
-├── pf-valutazione-rating.tsx           # Display valutazione (dati dal backend)
-└── pf-charts.tsx                       # Grafici comparativi biennali
+formulafinance/
+├── components/reports/
+│   ├── report-pf.tsx                   # Componente master + EBITDA + 4 equilibri + imposte/reddito netto SP
+│   ├── pf-andamento-economico.tsx      # Trend e incidenza ricavi
+│   ├── pf-stato-patrimoniale.tsx       # PN % attivo
+│   ├── pf-focus-finanziario.tsx        # Liquidità, oneri %, PD
+│   ├── pf-focus-tributario.tsx         # ISA score, tax rate, isEstimated flag
+│   ├── pf-adeguati-assetti.tsx         # **Formula Adeguati Assetti (solo frontend)**
+│   ├── pf-analisi-conto-economico.tsx  # Tabelle CE (full euro formatting)
+│   ├── pf-analisi-stato-patrimoniale.tsx  # **DuPont ROE (post-fix) + DSC + composizione (full euro)**
+│   ├── pf-valutazione-rating.tsx       # Display valutazione (dati dal backend)
+│   └── pf-charts.tsx                   # Grafici comparativi biennali
+└── lib/
+    └── extract-pf-context.ts           # Helper centralizzato AI context (chat + commenti)
 ```
