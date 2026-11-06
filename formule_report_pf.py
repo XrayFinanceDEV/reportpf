@@ -345,7 +345,7 @@ class ReportPFCalculator:
         """
         Calculate Free Cash Flow
 
-        Formula: MOL + Ammortamenti
+        Formula: MOL (già al lordo degli ammortamenti: non si sommano di nuovo)
                  - Δ(Working Capital)
                  - Δ(Fixed Assets)
         """
@@ -363,7 +363,8 @@ class ReportPFCalculator:
         mol = self._to_float(risultati_curr.get("mol", 0))
         ammortamenti = self._to_float(costi_curr.get("ammortamenti", 0))
 
-        operating_cf = mol + ammortamenti
+        # ICI014 (MOL) = valore aggiunto − personale: gli ammortamenti stanno sotto (ICI017 = MOL − amm. − acc.)
+        operating_cf = mol
 
         # Working Capital Change
         wc_curr = self._calculate_working_capital(rs_curr)
